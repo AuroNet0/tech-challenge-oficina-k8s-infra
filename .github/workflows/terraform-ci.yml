@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - homolog
-      - master
+      - main
   pull_request:
     branches:
       - homolog
-      - master
+      - main
   workflow_dispatch:
 
 jobs:
