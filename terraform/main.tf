@@ -22,8 +22,9 @@ resource "aws_subnet" "public_a" {
   map_public_ip_on_launch = true
 
   tags = merge(local.common_tags, {
-    Name = "tech-challenge-oficina-public-${var.aws_region}a"
-    Tier = "public"
+    Name                     = "tech-challenge-oficina-public-${var.aws_region}a"
+    Tier                     = "public"
+    "kubernetes.io/role/elb" = "1"
   })
 }
 
@@ -34,8 +35,9 @@ resource "aws_subnet" "public_b" {
   map_public_ip_on_launch = true
 
   tags = merge(local.common_tags, {
-    Name = "tech-challenge-oficina-public-${var.aws_region}b"
-    Tier = "public"
+    Name                     = "tech-challenge-oficina-public-${var.aws_region}b"
+    Tier                     = "public"
+    "kubernetes.io/role/elb" = "1"
   })
 }
 
@@ -45,8 +47,9 @@ resource "aws_subnet" "private_a" {
   availability_zone = "${var.aws_region}a"
 
   tags = merge(local.common_tags, {
-    Name = "tech-challenge-oficina-private-${var.aws_region}a"
-    Tier = "private"
+    Name                              = "tech-challenge-oficina-private-${var.aws_region}a"
+    Tier                              = "private"
+    "kubernetes.io/role/internal-elb" = "1"
   })
 }
 
@@ -56,8 +59,9 @@ resource "aws_subnet" "private_b" {
   availability_zone = "${var.aws_region}b"
 
   tags = merge(local.common_tags, {
-    Name = "tech-challenge-oficina-private-${var.aws_region}b"
-    Tier = "private"
+    Name                              = "tech-challenge-oficina-private-${var.aws_region}b"
+    Tier                              = "private"
+    "kubernetes.io/role/internal-elb" = "1"
   })
 }
 
