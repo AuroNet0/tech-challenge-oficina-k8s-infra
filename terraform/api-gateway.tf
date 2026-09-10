@@ -1,8 +1,12 @@
 data "aws_lambda_function" "auth" {
-  function_name = "tech-challenge-oficina-auth"
+  count = var.enable_api_gateway ? 1 : 0
+
+  function_name = var.auth_lambda_function_name
 }
 
 resource "aws_apigatewayv2_api" "oficina" {
+  count = var.enable_api_gateway ? 1 : 0
+
   name          = "tech-challenge-oficina-api"
   protocol_type = "HTTP"
 
@@ -12,7 +16,9 @@ resource "aws_apigatewayv2_api" "oficina" {
 }
 
 resource "aws_apigatewayv2_integration" "eks_backend" {
-  api_id                 = aws_apigatewayv2_api.oficina.id
+  count = var.enable_api_gateway ? 1 : 0
+
+  api_id                 = aws_apigatewayv2_api.oficina[0].id
   integration_type       = "HTTP_PROXY"
   integration_method     = "ANY"
   integration_uri        = var.api_backend_url
@@ -20,27 +26,35 @@ resource "aws_apigatewayv2_integration" "eks_backend" {
 }
 
 resource "aws_apigatewayv2_integration" "auth_lambda" {
-  api_id                 = aws_apigatewayv2_api.oficina.id
+  count = var.enable_api_gateway ? 1 : 0
+
+  api_id                 = aws_apigatewayv2_api.oficina[0].id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = data.aws_lambda_function.auth.invoke_arn
+  integration_uri        = data.aws_lambda_function.auth[0].invoke_arn
   payload_format_version = "2.0"
 }
 
 resource "aws_apigatewayv2_route" "auth" {
-  api_id    = aws_apigatewayv2_api.oficina.id
+  count = var.enable_api_gateway ? 1 : 0
+
+  api_id    = aws_apigatewayv2_api.oficina[0].id
   route_key = "POST /auth"
-  target    = "integrations/${aws_apigatewayv2_integration.auth_lambda.id}"
+  target    = "integrations/${aws_apigatewayv2_integration.auth_lambda[0].id}"
 }
 
 resource "aws_apigatewayv2_route" "default" {
-  api_id    = aws_apigatewayv2_api.oficina.id
+  count = var.enable_api_gateway ? 1 : 0
+
+  api_id    = aws_apigatewayv2_api.oficina[0].id
   route_key = "$default"
-  target    = "integrations/${aws_apigatewayv2_integration.eks_backend.id}"
+  target    = "integrations/${aws_apigatewayv2_integration.eks_backend[0].id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {
-  api_id      = aws_apigatewayv2_api.oficina.id
+  count = var.enable_api_gateway ? 1 : 0
+
+  api_id      = aws_apigatewayv2_api.oficina[0].id
   name        = "$default"
   auto_deploy = true
 
@@ -50,9 +64,11 @@ resource "aws_apigatewayv2_stage" "default" {
 }
 
 resource "aws_lambda_permission" "allow_api_gateway_auth" {
+  count = var.enable_api_gateway ? 1 : 0
+
   statement_id  = "AllowExecutionFromApiGateway"
   action        = "lambda:InvokeFunction"
-  function_name = data.aws_lambda_function.auth.function_name
+  function_name = data.aws_lambda_function.auth[0].function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.oficina.execution_arn}/*/POST/auth"
+  source_arn    = "${aws_apigatewayv2_api.oficina[0].execution_arn}/*/POST/auth"
 }

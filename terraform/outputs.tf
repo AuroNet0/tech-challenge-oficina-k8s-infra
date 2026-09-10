@@ -40,5 +40,5 @@ output "ecr_repository_url" {
 }
 
 output "api_gateway_url" {
-  value = aws_apigatewayv2_api.oficina.api_endpoint
+  value = var.enable_api_gateway ? aws_apigatewayv2_api.oficina[0].api_endpoint : null
 }
