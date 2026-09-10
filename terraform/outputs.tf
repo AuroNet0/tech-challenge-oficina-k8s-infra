@@ -38,3 +38,7 @@ output "ecr_repository_url" {
   description = "URL of the ECR repository for the API Docker image."
   value       = aws_ecr_repository.tech_challenge_oficina_api.repository_url
 }
+
+output "api_gateway_url" {
+  value = aws_apigatewayv2_api.oficina.api_endpoint
+}

@@ -3,3 +3,8 @@ variable "aws_region" {
   type        = string
   default     = "us-east-1"
 }
+
+variable "api_backend_url" {
+  description = "Base URL pública do Load Balancer da API no EKS"
+  type        = string
+}
