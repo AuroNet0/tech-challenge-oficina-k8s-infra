@@ -5,6 +5,18 @@ variable "aws_region" {
 }
 
 variable "api_backend_url" {
-  description = "Base URL pública do Load Balancer da API no EKS"
+  description = "Public base URL of the API Load Balancer on EKS."
   type        = string
+}
+
+variable "enable_api_gateway" {
+  description = "Whether to create the HTTP API Gateway resources."
+  type        = bool
+  default     = true
+}
+
+variable "auth_lambda_function_name" {
+  description = "Name of the authentication Lambda used by API Gateway."
+  type        = string
+  default     = "tech-challenge-oficina-auth"
 }
