@@ -7,12 +7,18 @@ variable "aws_region" {
 variable "api_backend_url" {
   description = "Public base URL of the API Load Balancer on EKS."
   type        = string
+  default     = null
+
+  validation {
+    condition     = !var.enable_api_gateway || var.api_backend_url != null
+    error_message = "api_backend_url must be set when enable_api_gateway is true."
+  }
 }
 
 variable "enable_api_gateway" {
   description = "Whether to create the HTTP API Gateway resources."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "auth_lambda_function_name" {
