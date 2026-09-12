@@ -156,6 +156,29 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      - name: Wait for EKS networking readiness
+        if: env.NEW_RELIC_ENABLED == 'true'
+        run: |
+          aws eks describe-addon \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --addon-name vpc-cni \
+            --region "$AWS_REGION"
+
+          kubectl wait nodes \
+            --all \
+            --for=condition=Ready \
+            --timeout=300s
+
+          kubectl rollout status daemonset/aws-node \
+            --namespace kube-system \
+            --timeout=300s
+
+          kubectl wait pods \
+            --namespace kube-system \
+            --selector k8s-app=aws-node \
+            --for=condition=Ready \
+            --timeout=300s
+
       - name: Terraform plan New Relic
         if: env.NEW_RELIC_ENABLED == 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
