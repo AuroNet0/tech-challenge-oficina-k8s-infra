@@ -3,7 +3,7 @@ locals {
   new_relic_cluster_name           = "tech-challenge-oficina"
   new_relic_api_base_url           = var.new_relic_api_base_url == null ? "" : trimspace(var.new_relic_api_base_url)
   new_relic_health_monitor_enabled = var.enable_new_relic && local.new_relic_api_base_url != ""
-  new_relic_health_check_url       = "${trimsuffix(local.new_relic_api_base_url, "/")}/actuator/health"
+  new_relic_health_check_url       = "${trimsuffix(local.new_relic_api_base_url, "/")}/actuator/health/readiness"
   new_relic_health_monitor_name    = "tech-challenge-oficina-api-health"
 }
 
