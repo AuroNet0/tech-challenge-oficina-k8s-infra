@@ -234,9 +234,11 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
         Sid    = "ReadVpcAndRdsConfig"
         Effect = "Allow"
         Action = [
+          "ec2:DescribeNetworkInterfaces",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSecurityGroupRules",
           "ec2:DescribeSubnets",
+          "ec2:DescribeVpcAttribute",
           "ec2:DescribeVpcs",
           "rds:DescribeDBInstances",
         ]
@@ -248,14 +250,37 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
         Action = [
           "ec2:CreateSecurityGroup",
         ]
+        Resource = aws_vpc.tech_challenge_oficina.arn
+      },
+      {
+        Sid    = "CreateTaggedAuthLambdaSecurityGroup"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+        ]
         Resource = [
-          aws_vpc.tech_challenge_oficina.arn,
           "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*",
         ]
         Condition = {
           StringEquals = {
             "aws:RequestTag/Project"     = "tech-challenge-oficina"
             "aws:RequestTag/Environment" = "shared"
+          }
+        }
+      },
+      {
+        Sid    = "TagAuthLambdaSecurityGroupOnCreate"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction"           = "CreateSecurityGroup"
+            "aws:RequestTag/Project"     = "tech-challenge-oficina"
+            "aws:RequestTag/Environment" = "shared"
+            "aws:RequestTag/Name"        = "tech-challenge-oficina-auth-lambda-sg"
           }
         }
       },
@@ -370,6 +395,7 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Sid    = "ReadNetworkForDatabase"
         Effect = "Allow"
         Action = [
+          "ec2:DescribeNetworkInterfaces",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSecurityGroupRules",
           "ec2:DescribeSubnets",
@@ -384,14 +410,37 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Action = [
           "ec2:CreateSecurityGroup",
         ]
+        Resource = aws_vpc.tech_challenge_oficina.arn
+      },
+      {
+        Sid    = "CreateTaggedDatabaseSecurityGroup"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+        ]
         Resource = [
-          aws_vpc.tech_challenge_oficina.arn,
           "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*",
         ]
         Condition = {
           StringEquals = {
             "aws:RequestTag/Project"     = "tech-challenge-oficina"
             "aws:RequestTag/Environment" = "shared"
+          }
+        }
+      },
+      {
+        Sid    = "TagDatabaseSecurityGroupOnCreate"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction"           = "CreateSecurityGroup"
+            "aws:RequestTag/Project"     = "tech-challenge-oficina"
+            "aws:RequestTag/Environment" = "shared"
+            "aws:RequestTag/Name"        = "tech-challenge-oficina-rds-sg"
           }
         }
       },
@@ -403,6 +452,7 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
           "ec2:CreateTags",
           "ec2:DeleteSecurityGroup",
           "ec2:DeleteTags",
+          "ec2:RevokeSecurityGroupEgress",
           "ec2:RevokeSecurityGroupIngress",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
@@ -437,11 +487,21 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Resource = "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:subgrp:tech-challenge-oficina-db-subnet-group"
       },
       {
+        Sid    = "CreatePostgresDbInstance"
+        Effect = "Allow"
+        Action = [
+          "rds:CreateDBInstance",
+        ]
+        Resource = [
+          "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:tech-challenge-oficina-postgres",
+          "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:subgrp:tech-challenge-oficina-db-subnet-group",
+        ]
+      },
+      {
         Sid    = "ManagePostgresDbInstance"
         Effect = "Allow"
         Action = [
           "rds:AddTagsToResource",
-          "rds:CreateDBInstance",
           "rds:DeleteDBInstance",
           "rds:ModifyDBInstance",
           "rds:RemoveTagsFromResource",
