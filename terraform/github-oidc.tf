@@ -603,6 +603,7 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "ec2:DescribeInternetGateways",
           "ec2:DescribeRouteTables",
           "ec2:DescribeSubnets",
+          "ec2:DescribeVpcAttribute",
           "ec2:DescribeVpcs",
           "ec2:DetachInternetGateway",
           "ec2:DisassociateRouteTable",

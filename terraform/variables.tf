@@ -38,6 +38,13 @@ variable "new_relic_account_id" {
   }
 }
 
+variable "new_relic_api_key" {
+  description = "New Relic API key used by the provider."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "new_relic_api_base_url" {
   description = "Public base URL of the API used by the New Relic /actuator/health synthetic monitor. Leave null to skip creating the monitor."
   type        = string
