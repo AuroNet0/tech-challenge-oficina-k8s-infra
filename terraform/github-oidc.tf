@@ -795,6 +795,7 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
         Effect = "Allow"
         Action = [
           "lambda:GetFunction",
+          "lambda:GetFunctionCodeSigningConfig",
           "lambda:ListVersionsByFunction",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.auth_lambda_function_name}"
