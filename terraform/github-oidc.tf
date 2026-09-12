@@ -694,3 +694,27 @@ resource "aws_eks_access_policy_association" "github_actions_api_deploy_edit" {
     aws_eks_access_entry.github_actions_api_deploy,
   ]
 }
+
+resource "aws_eks_access_entry" "github_actions_k8s_infra_deploy" {
+  cluster_name  = aws_eks_cluster.tech_challenge_oficina.name
+  principal_arn = aws_iam_role.github_actions_k8s_infra_deploy.arn
+  type          = "STANDARD"
+
+  tags = merge(local.common_tags, {
+    Name = "tech-challenge-oficina-k8s-infra-deploy-role"
+  })
+}
+
+resource "aws_eks_access_policy_association" "github_actions_k8s_infra_deploy_cluster_admin" {
+  cluster_name  = aws_eks_cluster.tech_challenge_oficina.name
+  principal_arn = aws_iam_role.github_actions_k8s_infra_deploy.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [
+    aws_eks_access_entry.github_actions_k8s_infra_deploy,
+  ]
+}
