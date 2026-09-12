@@ -45,6 +45,12 @@ variable "new_relic_api_key" {
   sensitive   = true
 }
 
+variable "new_relic_region" {
+  description = "New Relic account region used by the provider."
+  type        = string
+  default     = "US"
+}
+
 variable "new_relic_api_base_url" {
   description = "Public base URL of the API used by the New Relic /actuator/health synthetic monitor. Leave null to skip creating the monitor."
   type        = string

@@ -122,6 +122,16 @@ jobs:
         if: env.NEW_RELIC_ENABLED == 'true'
         uses: azure/setup-kubectl@v4
 
+      - name: Validate New Relic API key
+        if: env.NEW_RELIC_ENABLED == 'true'
+        env:
+          NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+        run: |
+          if [ -z "$NEW_RELIC_API_KEY" ]; then
+            echo "NEW_RELIC_API_KEY environment secret is required when New Relic is enabled."
+            exit 1
+          fi
+
       - name: Prepare New Relic license Secret
         if: env.NEW_RELIC_ENABLED == 'true'
         env:
@@ -153,9 +163,8 @@ jobs:
           TF_VAR_enable_new_relic: ${{ vars.ENABLE_NEW_RELIC }}
           TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
           TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
+          TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
           TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
-          NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
-          NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
         run: terraform plan -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
 
       - name: Terraform apply New Relic
@@ -165,7 +174,21 @@ jobs:
           TF_VAR_enable_new_relic: ${{ vars.ENABLE_NEW_RELIC }}
           TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
           TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
+          TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
           TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
-          NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
-          NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
-        run: terraform apply -auto-approve -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
+        run: |
+          terraform apply -auto-approve \
+            -var="enable_api_gateway=${ENABLE_API_GATEWAY}" \
+            -var="api_backend_url=${API_BACKEND_URL}" \
+            -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" \
+            -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" \
+            -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}" || {
+              aws eks update-kubeconfig \
+                --region "$AWS_REGION" \
+                --name "$EKS_CLUSTER_NAME"
+
+              kubectl get pods -n newrelic -o wide || true
+              kubectl get events -n newrelic --sort-by=.lastTimestamp || true
+              kubectl describe pods -n newrelic || true
+              exit 1
+            }
