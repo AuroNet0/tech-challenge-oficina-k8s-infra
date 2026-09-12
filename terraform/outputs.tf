@@ -33,3 +33,32 @@ output "eks_node_group_name" {
   description = "Name of the EKS managed node group."
   value       = aws_eks_node_group.tech_challenge_oficina.node_group_name
 }
+
+output "ecr_repository_url" {
+  description = "URL of the ECR repository for the API Docker image."
+  value       = aws_ecr_repository.tech_challenge_oficina_api.repository_url
+}
+
+output "aws_deploy_role_arn" {
+  description = "ARN of the IAM role assumed by GitHub Actions to deploy the API."
+  value       = aws_iam_role.github_actions_api_deploy.arn
+}
+
+output "auth_deploy_role_arn" {
+  description = "ARN of the IAM role assumed by GitHub Actions to deploy the Auth Lambda."
+  value       = aws_iam_role.github_actions_auth_deploy.arn
+}
+
+output "database_deploy_role_arn" {
+  description = "ARN of the IAM role assumed by GitHub Actions to deploy the database infrastructure."
+  value       = aws_iam_role.github_actions_database_deploy.arn
+}
+
+output "k8s_infra_deploy_role_arn" {
+  description = "ARN of the IAM role assumed by GitHub Actions to deploy this Kubernetes infrastructure."
+  value       = aws_iam_role.github_actions_k8s_infra_deploy.arn
+}
+
+output "api_gateway_url" {
+  value = var.enable_api_gateway ? aws_apigatewayv2_api.oficina[0].api_endpoint : null
+}
