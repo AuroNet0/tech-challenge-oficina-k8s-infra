@@ -14,6 +14,8 @@ on:
 env:
   AWS_REGION: us-east-1
   TF_WORKING_DIR: terraform
+  EKS_CLUSTER_NAME: tech-challenge-oficina
+  NEW_RELIC_ENABLED: ${{ vars.ENABLE_NEW_RELIC == 'true' && 'true' || 'false' }}
 
 jobs:
   terraform-ci:
@@ -73,10 +75,93 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform init
 
-      - name: Terraform plan
+      - name: Check EKS cluster
+        id: check_eks_cluster
+        if: env.NEW_RELIC_ENABLED == 'true'
+        run: |
+          if aws eks describe-cluster \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME" \
+            >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Terraform plan base infrastructure
+        if: env.NEW_RELIC_ENABLED == 'true' && steps.check_eks_cluster.outputs.exists != 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: false
+        run: terraform plan
+
+      - name: Terraform apply base infrastructure
+        if: env.NEW_RELIC_ENABLED == 'true' && steps.check_eks_cluster.outputs.exists != 'true'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: false
+        run: terraform apply -auto-approve
+
+      - name: Terraform plan
+        if: env.NEW_RELIC_ENABLED != 'true'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: false
         run: terraform plan
 
       - name: Terraform apply
+        if: env.NEW_RELIC_ENABLED != 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: false
+        run: terraform apply -auto-approve
+
+      - name: Setup kubectl
+        if: env.NEW_RELIC_ENABLED == 'true'
+        uses: azure/setup-kubectl@v4
+
+      - name: Prepare New Relic license Secret
+        if: env.NEW_RELIC_ENABLED == 'true'
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: |
+          if [ -z "$NEW_RELIC_LICENSE_KEY" ]; then
+            echo "NEW_RELIC_LICENSE_KEY environment secret is required when New Relic is enabled."
+            exit 1
+          fi
+
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME"
+
+          kubectl create namespace newrelic \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+          kubectl create secret generic newrelic-license \
+            --namespace newrelic \
+            --from-literal=licenseKey="$NEW_RELIC_LICENSE_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Terraform plan New Relic
+        if: env.NEW_RELIC_ENABLED == 'true'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: ${{ vars.ENABLE_NEW_RELIC }}
+          TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+          TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
+          NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+          NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
+        run: terraform plan
+
+      - name: Terraform apply New Relic
+        if: env.NEW_RELIC_ENABLED == 'true'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_enable_new_relic: ${{ vars.ENABLE_NEW_RELIC }}
+          TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+          TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
+          NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+          NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
         run: terraform apply -auto-approve
