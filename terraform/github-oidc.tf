@@ -291,6 +291,38 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
           "logs:UntagLogGroup",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/tech-challenge-oficina-auth*"
+      },
+      {
+        Sid    = "ListAuthTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "auth/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteAuthTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/auth/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageAuthTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/auth/terraform.tfstate.tflock"
       }
     ]
   })
@@ -414,6 +446,38 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
           "rds:RemoveTagsFromResource",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:tech-challenge-oficina-postgres"
+      },
+      {
+        Sid    = "ListDatabaseInfraTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "database-infra/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteDatabaseInfraTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/database-infra/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageDatabaseInfraTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/database-infra/terraform.tfstate.tflock"
       }
     ]
   })
@@ -564,6 +628,38 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "eks:ListAccessPolicies",
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "ListK8sInfraTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "k8s-infra/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteK8sInfraTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/k8s-infra/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageK8sInfraTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/k8s-infra/terraform.tfstate.tflock"
       },
       {
         Sid    = "ManageProjectIam"
