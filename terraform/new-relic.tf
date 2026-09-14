@@ -6,6 +6,7 @@ resource "helm_release" "new_relic" {
   chart            = "nri-bundle"
   namespace        = "newrelic"
   create_namespace = true
+  timeout          = 1800
 
   values = [
     yamlencode({
