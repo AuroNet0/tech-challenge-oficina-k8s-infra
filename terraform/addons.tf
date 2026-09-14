@@ -10,3 +10,12 @@ resource "aws_eks_addon" "metrics_server" {
     aws_eks_node_group.tech_challenge_oficina,
   ]
 }
+
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name = aws_eks_cluster.tech_challenge_oficina.name
+  addon_name   = "vpc-cni"
+
+  depends_on = [
+    aws_eks_cluster.tech_challenge_oficina
+  ]
+}
