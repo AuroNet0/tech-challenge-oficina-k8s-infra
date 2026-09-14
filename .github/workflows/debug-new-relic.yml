@@ -25,6 +25,10 @@ jobs:
     name: Debug New Relic
     runs-on: ubuntu-latest
     environment: homolog
+    env:
+      NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+      NEW_RELIC_ACCOUNT_ID: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+      NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
 
     permissions:
       id-token: write
@@ -219,26 +223,43 @@ jobs:
             exit "$status"
           fi
 
+      - name: Validate New Relic provider environment
+        if: inputs.mode == 'import-helm-state'
+        run: |
+          if [ -z "$NEW_RELIC_API_KEY" ]; then
+            echo "NEW_RELIC_API_KEY missing"
+            exit 1
+          fi
+
+          if [ -z "$NEW_RELIC_ACCOUNT_ID" ]; then
+            echo "NEW_RELIC_ACCOUNT_ID missing"
+            exit 1
+          fi
+
+          if [ -z "$NEW_RELIC_REGION" ]; then
+            echo "NEW_RELIC_REGION missing"
+            exit 1
+          fi
+
+          echo "New Relic provider environment configured."
+          echo "Account ID: $NEW_RELIC_ACCOUNT_ID"
+          echo "Region: $NEW_RELIC_REGION"
+
       - name: Import New Relic Helm release into Terraform state
         if: inputs.mode == 'import-helm-state'
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
-          TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
-          TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
-          TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
-          TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
           TF_VAR_enable_new_relic: "true"
           TF_VAR_enable_api_gateway: ${{ vars.ENABLE_API_GATEWAY }}
           TF_VAR_api_backend_url: ${{ vars.API_BACKEND_URL }}
+          TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
         run: |
           terraform init -input=false
 
           if terraform state show 'helm_release.new_relic[0]' >/dev/null 2>&1; then
-            echo "helm_release.new_relic[0] is already imported in Terraform state."
+            echo "Helm release already present in Terraform state."
           else
-            terraform import \
-              'helm_release.new_relic[0]' \
-              'newrelic/newrelic-bundle'
+            terraform import 'helm_release.new_relic[0]' 'newrelic/newrelic-bundle'
           fi
 
           terraform state show 'helm_release.new_relic[0]'

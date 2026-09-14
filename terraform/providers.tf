@@ -13,3 +13,5 @@ provider "helm" {
     token                  = data.aws_eks_cluster_auth.tech_challenge_oficina.token
   }
 }
+
+provider "newrelic" {}
