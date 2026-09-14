@@ -15,6 +15,7 @@ on:
           - deploy-helm-cli
           - import-helm-state
           - plan-observability
+          - diagnose-apm
 
 env:
   AWS_REGION: us-east-1
@@ -98,6 +99,49 @@ jobs:
       - name: Stop after diagnosis
         if: inputs.mode == 'diagnose'
         run: echo "Diagnosis complete. No deployment requested."
+
+      - name: Diagnose APM
+        if: inputs.mode == 'diagnose-apm'
+        run: |
+          kubectl get pods -n default -l app=oficina-api -o wide || {
+            kubectl get deployment oficina-api -n default -o wide
+            kubectl get deployment oficina-api -n default --show-labels
+            kubectl get pods -n default --show-labels
+          }
+
+          kubectl get deployment oficina-api -n default \
+            -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+            | grep -viE 'license|secret|token|password|key' || true
+          echo
+
+          kubectl exec -n default deployment/oficina-api -- sh -c '
+            echo "NEW_RELIC_ENABLED=${NEW_RELIC_ENABLED:-MISSING}"
+            echo "NEW_RELIC_APP_NAME=${NEW_RELIC_APP_NAME:-MISSING}"
+            if [ -n "$NEW_RELIC_LICENSE_KEY" ]; then
+              echo "NEW_RELIC_LICENSE_KEY=SET"
+            else
+              echo "NEW_RELIC_LICENSE_KEY=MISSING"
+            fi
+          '
+
+          kubectl exec -n default deployment/oficina-api -- sh -c '
+            ps aux 2>/dev/null | grep "[j]ava" || cat /proc/1/cmdline | tr "\0" " "
+          '
+          echo
+
+          kubectl logs -n default deployment/oficina-api --tail=500 \
+            | grep -iE "new relic|newrelic|javaagent|license|collector|agent" || true
+
+          kubectl exec -n default deployment/oficina-api -- sh -c '
+            find /app -maxdepth 3 -type f \( -iname "*newrelic*" -o -iname "*newrelic*.log" \) 2>/dev/null || true
+          '
+
+          kubectl exec -n default deployment/oficina-api -- sh -c '
+            log_file="$(find /app -maxdepth 3 -type f -iname "newrelic_agent.log" 2>/dev/null | head -n 1)"
+            if [ -n "$log_file" ]; then
+              tail -n 100 "$log_file"
+            fi
+          '
 
       - name: Reset New Relic Helm release
         if: inputs.mode == 'reset-helm'
