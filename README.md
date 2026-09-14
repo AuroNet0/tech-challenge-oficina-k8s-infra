@@ -34,6 +34,84 @@ Internet
 
 O RDS PostgreSQL e provisionado no repositorio de banco de dados, mas consome a rede privada criada por este repositorio.
 
+## Diagrama da arquitetura
+
+```mermaid
+flowchart TB
+    USER["Usuários"]
+
+    subgraph GITHUB["GitHub"]
+        ACTIONS["GitHub Actions"]
+        OIDC["GitHub OIDC"]
+        ACTIONS --> OIDC
+    end
+
+    subgraph AWS["AWS Cloud"]
+
+        APIGW["API Gateway<br/>HTTP API"]
+        ECR["Amazon ECR"]
+
+        subgraph NETWORK["VPC 10.0.0.0/16"]
+
+            IGW["Internet Gateway"]
+
+            subgraph PUBLIC["Public Subnets"]
+                LB["Load Balancer"]
+
+                subgraph EKS["Amazon EKS"]
+                    NODE["Managed Node Group<br/>m7i-flex.large"]
+
+                    API["Oficina API"]
+                    CNI["VPC CNI<br/>aws-node"]
+                    METRICS["metrics-server"]
+                    NRAGENT["New Relic<br/>Infrastructure Agent"]
+
+                    NODE --> API
+                    NODE --> CNI
+                    NODE --> METRICS
+                    NODE --> NRAGENT
+                end
+            end
+
+            subgraph PRIVATE["Private Subnets"]
+                RDS[("Amazon RDS<br/>PostgreSQL")]
+            end
+        end
+
+        LAMBDA["AWS Lambda<br/>Auth por CPF"]
+    end
+
+    subgraph NR["New Relic"]
+        APM["APM / Logs"]
+        DASH["Dashboard"]
+        ALERTS["Alerts"]
+        SYNTH["Synthetic Monitor"]
+    end
+
+    USER -->|HTTPS| APIGW
+
+    APIGW -->|"Rotas da aplicação"| LB
+    APIGW -->|"Autenticação CPF"| LAMBDA
+
+    LB --> API
+
+    API --> RDS
+    LAMBDA --> RDS
+
+    ECR -->|"Imagem Docker"| API
+
+    IGW --> PUBLIC
+
+    OIDC -->|"Assume Role"| AWS
+
+    API --> APM
+    NRAGENT --> DASH
+
+    APM --> DASH
+    DASH --> ALERTS
+    SYNTH -->|"Readiness check"| APIGW
+```
+
 ## Rede
 
 | Camada | Recurso | CIDR | Availability Zone | Finalidade |
