@@ -26,9 +26,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: homolog
     env:
+      AWS_REGION: us-east-1
+      TF_WORKING_DIR: terraform
+      EKS_CLUSTER_NAME: tech-challenge-oficina
       NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
       NEW_RELIC_ACCOUNT_ID: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
       NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
+      TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
+      TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+      TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
+      TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
+      TF_VAR_enable_new_relic: "true"
+      TF_VAR_enable_api_gateway: ${{ vars.ENABLE_API_GATEWAY }}
+      TF_VAR_api_backend_url: ${{ vars.API_BACKEND_URL }}
 
     permissions:
       id-token: write
