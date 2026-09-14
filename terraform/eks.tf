@@ -88,7 +88,7 @@ resource "aws_eks_node_group" "tech_challenge_oficina" {
   node_group_name = "tech-challenge-oficina-nodes"
   node_role_arn   = aws_iam_role.eks_nodes.arn
   subnet_ids      = [aws_subnet.public_a.id, aws_subnet.public_b.id]
-  instance_types  = ["t3.small"]
+  instance_types  = ["m7i-flex.large"]
   capacity_type   = "ON_DEMAND"
 
   scaling_config {
