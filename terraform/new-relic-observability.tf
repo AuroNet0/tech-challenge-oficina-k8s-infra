@@ -104,7 +104,7 @@ resource "newrelic_one_dashboard" "tech_challenge_oficina" {
 
       nrql_query {
         account_id = var.new_relic_account_id
-        query      = "FROM OrdemServicoStageDuration SELECT average(durationMs) FACET stage SINCE 7 days ago"
+        query      = "FROM OrdemServicoStageDuration SELECT average(durationSeconds) FACET stage SINCE 7 days ago"
       }
     }
 
