@@ -12,6 +12,7 @@ on:
           - diagnose
           - deploy-helm
           - reset-helm
+          - deploy-helm-cli
 
 env:
   AWS_REGION: us-east-1
@@ -101,6 +102,121 @@ jobs:
 
           helm list -n newrelic || true
           kubectl get pods -n newrelic -o wide || true
+
+      - name: Deploy New Relic with Helm CLI
+        if: inputs.mode == 'deploy-helm-cli'
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: |
+          if [ -z "$NEW_RELIC_LICENSE_KEY" ]; then
+            echo "NEW_RELIC_LICENSE_KEY environment secret is required for deploy-helm-cli mode."
+            exit 1
+          fi
+
+          kubectl create namespace newrelic --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic newrelic-license \
+            --namespace newrelic \
+            --from-literal=licenseKey="$NEW_RELIC_LICENSE_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+          cat > /tmp/newrelic-values.yaml <<'EOF'
+          global:
+            cluster: tech-challenge-oficina
+            customSecretName: newrelic-license
+            customSecretLicenseKey: licenseKey
+            lowDataMode: true
+
+          infrastructure:
+            enabled: true
+
+          newrelic-infrastructure:
+            enabled: true
+
+            kubelet:
+              kubelet:
+                resources:
+                  limits:
+                    memory: 256Mi
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+
+              agent:
+                resources:
+                  limits:
+                    memory: 256Mi
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+
+            ksm:
+              ksm:
+                resources:
+                  limits:
+                    memory: 256Mi
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+
+              forwarder:
+                resources:
+                  limits:
+                    memory: 256Mi
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
+
+          nri-metadata-injection:
+            enabled: true
+
+            resources:
+              limits:
+                memory: 64Mi
+              requests:
+                cpu: 25m
+                memory: 20Mi
+
+          ksm:
+            enabled: true
+
+          kube-state-metrics:
+            enabled: true
+
+            resources:
+              limits:
+                memory: 128Mi
+              requests:
+                cpu: 25m
+                memory: 48Mi
+          EOF
+
+          helm repo add newrelic https://helm-charts.newrelic.com
+          helm repo update
+
+          set +e
+          helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+            --namespace newrelic \
+            --version 8.0.24 \
+            --wait \
+            --timeout 5m \
+            --debug \
+            -f /tmp/newrelic-values.yaml
+          status=$?
+          set -e
+
+          helm status newrelic-bundle -n newrelic || true
+          kubectl get pods -n newrelic -o wide || true
+          kubectl get deployments -n newrelic || true
+          kubectl get daemonsets -n newrelic || true
+          kubectl get events -n newrelic --sort-by=.lastTimestamp || true
+
+          if [ "$status" -ne 0 ]; then
+            kubectl describe pods -n newrelic || true
+            helm get all newrelic-bundle -n newrelic || true
+            exit "$status"
+          fi
 
       - name: Prepare New Relic license Secret
         if: inputs.mode == 'deploy-helm'
