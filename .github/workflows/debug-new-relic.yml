@@ -11,6 +11,7 @@ on:
         options:
           - diagnose
           - deploy-helm
+          - reset-helm
 
 env:
   AWS_REGION: us-east-1
@@ -80,6 +81,26 @@ jobs:
       - name: Stop after diagnosis
         if: inputs.mode == 'diagnose'
         run: echo "Diagnosis complete. No deployment requested."
+
+      - name: Reset New Relic Helm release
+        if: inputs.mode == 'reset-helm'
+        run: |
+          helm status newrelic-bundle -n newrelic || true
+          kubectl get pods -n newrelic -o wide || true
+
+          helm uninstall newrelic-bundle \
+            -n newrelic \
+            --wait \
+            --timeout 120s || true
+
+          kubectl wait \
+            --for=delete pod \
+            -l app.kubernetes.io/instance=newrelic-bundle \
+            -n newrelic \
+            --timeout=120s || true
+
+          helm list -n newrelic || true
+          kubectl get pods -n newrelic -o wide || true
 
       - name: Prepare New Relic license Secret
         if: inputs.mode == 'deploy-helm'
