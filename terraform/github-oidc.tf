@@ -679,6 +679,7 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/tech-challenge-oficina",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:nodegroup/tech-challenge-oficina/tech-challenge-oficina-nodes/*",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:addon/tech-challenge-oficina/metrics-server/*",
+          "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:addon/tech-challenge-oficina/vpc-cni/*",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:access-entry/tech-challenge-oficina/*",
         ]
       },
