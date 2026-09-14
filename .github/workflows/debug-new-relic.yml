@@ -14,6 +14,7 @@ on:
           - reset-helm
           - deploy-helm-cli
           - import-helm-state
+          - plan-observability
 
 env:
   AWS_REGION: us-east-1
@@ -234,7 +235,7 @@ jobs:
           fi
 
       - name: Validate New Relic provider environment
-        if: inputs.mode == 'import-helm-state'
+        if: inputs.mode == 'import-helm-state' || inputs.mode == 'plan-observability'
         run: |
           if [ -z "$NEW_RELIC_API_KEY" ]; then
             echo "NEW_RELIC_API_KEY missing"
@@ -273,6 +274,18 @@ jobs:
           fi
 
           terraform state show 'helm_release.new_relic[0]'
+
+      - name: Terraform plan observability
+        if: inputs.mode == 'plan-observability'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -input=false
+
+          terraform plan \
+            -input=false \
+            -out=/tmp/observability.tfplan
+
+          terraform show -no-color /tmp/observability.tfplan
 
       - name: Prepare New Relic license Secret
         if: inputs.mode == 'deploy-helm'
