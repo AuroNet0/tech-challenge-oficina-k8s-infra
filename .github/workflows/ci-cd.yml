@@ -40,7 +40,7 @@ jobs:
 
       - name: Terraform init without backend
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init -backend=false
+        run: terraform init -input=false -backend=false
 
       - name: Terraform validate
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -75,7 +75,7 @@ jobs:
 
       - name: Terraform init
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform init
+        run: terraform init -input=false
 
       - name: Check EKS cluster
         id: check_eks_cluster
@@ -95,28 +95,28 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           TF_VAR_enable_new_relic: false
-        run: terraform plan -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
+        run: terraform plan -input=false -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
 
       - name: Terraform apply base infrastructure
         if: env.NEW_RELIC_ENABLED == 'true' && steps.check_eks_cluster.outputs.exists != 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           TF_VAR_enable_new_relic: false
-        run: terraform apply -auto-approve -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
+        run: terraform apply -input=false -auto-approve -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
 
       - name: Terraform plan
         if: env.NEW_RELIC_ENABLED != 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           TF_VAR_enable_new_relic: false
-        run: terraform plan -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
+        run: terraform plan -input=false -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
 
       - name: Terraform apply
         if: env.NEW_RELIC_ENABLED != 'true'
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           TF_VAR_enable_new_relic: false
-        run: terraform apply -auto-approve -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
+        run: terraform apply -input=false -auto-approve -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=false"
 
       - name: Setup kubectl
         if: env.NEW_RELIC_ENABLED == 'true'
@@ -184,7 +184,7 @@ jobs:
           TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
           TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
           TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
-        run: terraform plan -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
+        run: terraform plan -input=false -var="enable_api_gateway=${ENABLE_API_GATEWAY}" -var="api_backend_url=${API_BACKEND_URL}" -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
 
       - name: Terraform apply New Relic
         if: env.NEW_RELIC_ENABLED == 'true'
@@ -196,7 +196,7 @@ jobs:
           TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
           TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
         run: |
-          terraform apply -auto-approve \
+          terraform apply -input=false -auto-approve \
             -var="enable_api_gateway=${ENABLE_API_GATEWAY}" \
             -var="api_backend_url=${API_BACKEND_URL}" \
             -var="enable_new_relic=${{ vars.ENABLE_NEW_RELIC }}" \
