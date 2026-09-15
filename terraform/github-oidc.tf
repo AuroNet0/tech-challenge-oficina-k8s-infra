@@ -234,9 +234,11 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
         Sid    = "ReadVpcAndRdsConfig"
         Effect = "Allow"
         Action = [
+          "ec2:DescribeNetworkInterfaces",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSecurityGroupRules",
           "ec2:DescribeSubnets",
+          "ec2:DescribeVpcAttribute",
           "ec2:DescribeVpcs",
           "rds:DescribeDBInstances",
         ]
@@ -248,14 +250,37 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
         Action = [
           "ec2:CreateSecurityGroup",
         ]
+        Resource = aws_vpc.tech_challenge_oficina.arn
+      },
+      {
+        Sid    = "CreateTaggedAuthLambdaSecurityGroup"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+        ]
         Resource = [
-          aws_vpc.tech_challenge_oficina.arn,
           "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*",
         ]
         Condition = {
           StringEquals = {
             "aws:RequestTag/Project"     = "tech-challenge-oficina"
             "aws:RequestTag/Environment" = "shared"
+          }
+        }
+      },
+      {
+        Sid    = "TagAuthLambdaSecurityGroupOnCreate"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction"           = "CreateSecurityGroup"
+            "aws:RequestTag/Project"     = "tech-challenge-oficina"
+            "aws:RequestTag/Environment" = "shared"
+            "aws:RequestTag/Name"        = "tech-challenge-oficina-auth-lambda-sg"
           }
         }
       },
@@ -291,6 +316,38 @@ resource "aws_iam_role_policy" "github_actions_auth_deploy" {
           "logs:UntagLogGroup",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/tech-challenge-oficina-auth*"
+      },
+      {
+        Sid    = "ListAuthTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "auth/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteAuthTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/auth/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageAuthTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/auth/terraform.tfstate.tflock"
       }
     ]
   })
@@ -338,9 +395,11 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Sid    = "ReadNetworkForDatabase"
         Effect = "Allow"
         Action = [
+          "ec2:DescribeNetworkInterfaces",
           "ec2:DescribeSecurityGroups",
           "ec2:DescribeSecurityGroupRules",
           "ec2:DescribeSubnets",
+          "ec2:DescribeVpcAttribute",
           "ec2:DescribeVpcs",
         ]
         Resource = "*"
@@ -351,14 +410,37 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Action = [
           "ec2:CreateSecurityGroup",
         ]
+        Resource = aws_vpc.tech_challenge_oficina.arn
+      },
+      {
+        Sid    = "CreateTaggedDatabaseSecurityGroup"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateSecurityGroup",
+        ]
         Resource = [
-          aws_vpc.tech_challenge_oficina.arn,
           "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*",
         ]
         Condition = {
           StringEquals = {
             "aws:RequestTag/Project"     = "tech-challenge-oficina"
             "aws:RequestTag/Environment" = "shared"
+          }
+        }
+      },
+      {
+        Sid    = "TagDatabaseSecurityGroupOnCreate"
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateTags",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
+        Condition = {
+          StringEquals = {
+            "ec2:CreateAction"           = "CreateSecurityGroup"
+            "aws:RequestTag/Project"     = "tech-challenge-oficina"
+            "aws:RequestTag/Environment" = "shared"
+            "aws:RequestTag/Name"        = "tech-challenge-oficina-rds-sg"
           }
         }
       },
@@ -370,6 +452,7 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
           "ec2:CreateTags",
           "ec2:DeleteSecurityGroup",
           "ec2:DeleteTags",
+          "ec2:RevokeSecurityGroupEgress",
           "ec2:RevokeSecurityGroupIngress",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:security-group/*"
@@ -404,16 +487,58 @@ resource "aws_iam_role_policy" "github_actions_database_deploy" {
         Resource = "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:subgrp:tech-challenge-oficina-db-subnet-group"
       },
       {
+        Sid    = "CreatePostgresDbInstance"
+        Effect = "Allow"
+        Action = [
+          "rds:CreateDBInstance",
+        ]
+        Resource = [
+          "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:tech-challenge-oficina-postgres",
+          "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:subgrp:tech-challenge-oficina-db-subnet-group",
+        ]
+      },
+      {
         Sid    = "ManagePostgresDbInstance"
         Effect = "Allow"
         Action = [
           "rds:AddTagsToResource",
-          "rds:CreateDBInstance",
           "rds:DeleteDBInstance",
           "rds:ModifyDBInstance",
           "rds:RemoveTagsFromResource",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:tech-challenge-oficina-postgres"
+      },
+      {
+        Sid    = "ListDatabaseInfraTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "database-infra/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteDatabaseInfraTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/database-infra/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageDatabaseInfraTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/database-infra/terraform.tfstate.tflock"
       }
     ]
   })
@@ -478,6 +603,7 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "ec2:DescribeInternetGateways",
           "ec2:DescribeRouteTables",
           "ec2:DescribeSubnets",
+          "ec2:DescribeVpcAttribute",
           "ec2:DescribeVpcs",
           "ec2:DetachInternetGateway",
           "ec2:DisassociateRouteTable",
@@ -553,6 +679,7 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/tech-challenge-oficina",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:nodegroup/tech-challenge-oficina/tech-challenge-oficina-nodes/*",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:addon/tech-challenge-oficina/metrics-server/*",
+          "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:addon/tech-challenge-oficina/vpc-cni/*",
           "arn:${data.aws_partition.current.partition}:eks:${var.aws_region}:${data.aws_caller_identity.current.account_id}:access-entry/tech-challenge-oficina/*",
         ]
       },
@@ -564,6 +691,38 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
           "eks:ListAccessPolicies",
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "ListK8sInfraTerraformStatePrefix"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "k8s-infra/*"
+          }
+        }
+      },
+      {
+        Sid    = "ReadWriteK8sInfraTerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/k8s-infra/terraform.tfstate"
+      },
+      {
+        Sid    = "ManageK8sInfraTerraformStateLock"
+        Effect = "Allow"
+        Action = [
+          "s3:DeleteObject",
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = "arn:${data.aws_partition.current.partition}:s3:::tech-challenge-oficina-terraform-state-b1cfa326/k8s-infra/terraform.tfstate.tflock"
       },
       {
         Sid    = "ManageProjectIam"
@@ -637,6 +796,8 @@ resource "aws_iam_role_policy" "github_actions_k8s_infra_deploy" {
         Effect = "Allow"
         Action = [
           "lambda:GetFunction",
+          "lambda:GetFunctionCodeSigningConfig",
+          "lambda:ListVersionsByFunction",
         ]
         Resource = "arn:${data.aws_partition.current.partition}:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.auth_lambda_function_name}"
       },

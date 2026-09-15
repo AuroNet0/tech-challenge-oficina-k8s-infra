@@ -6,6 +6,7 @@ resource "helm_release" "new_relic" {
   chart            = "nri-bundle"
   namespace        = "newrelic"
   create_namespace = true
+  timeout          = 1800
 
   values = [
     yamlencode({
@@ -22,6 +23,72 @@ resource "helm_release" "new_relic" {
 
       "newrelic-infrastructure" = {
         enabled = true
+
+        kubelet = {
+          kubelet = {
+            resources = {
+              limits = {
+                memory = "256Mi"
+              }
+              requests = {
+                cpu    = "50m"
+                memory = "64Mi"
+              }
+            }
+          }
+
+          agent = {
+            resources = {
+              limits = {
+                memory = "256Mi"
+              }
+              requests = {
+                cpu    = "50m"
+                memory = "64Mi"
+              }
+            }
+          }
+        }
+
+        ksm = {
+          ksm = {
+            resources = {
+              limits = {
+                memory = "256Mi"
+              }
+              requests = {
+                cpu    = "50m"
+                memory = "64Mi"
+              }
+            }
+          }
+
+          forwarder = {
+            resources = {
+              limits = {
+                memory = "256Mi"
+              }
+              requests = {
+                cpu    = "50m"
+                memory = "64Mi"
+              }
+            }
+          }
+        }
+      }
+
+      "nri-metadata-injection" = {
+        enabled = true
+
+        resources = {
+          limits = {
+            memory = "64Mi"
+          }
+          requests = {
+            cpu    = "25m"
+            memory = "20Mi"
+          }
+        }
       }
 
       ksm = {
@@ -30,6 +97,16 @@ resource "helm_release" "new_relic" {
 
       "kube-state-metrics" = {
         enabled = true
+
+        resources = {
+          limits = {
+            memory = "128Mi"
+          }
+          requests = {
+            cpu    = "25m"
+            memory = "48Mi"
+          }
+        }
       }
     }),
   ]
