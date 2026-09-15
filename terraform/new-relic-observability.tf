@@ -220,6 +220,31 @@ resource "newrelic_nrql_alert_condition" "api_high_latency" {
   }
 }
 
+resource "newrelic_nrql_alert_condition" "service_order_processing_failures" {
+  count = var.enable_new_relic ? 1 : 0
+
+  account_id                   = var.new_relic_account_id
+  policy_id                    = newrelic_alert_policy.tech_challenge_oficina[0].id
+  type                         = "static"
+  name                         = "Service order processing failures"
+  enabled                      = true
+  violation_time_limit_seconds = 3600
+  aggregation_window           = 60
+  aggregation_method           = "event_flow"
+  aggregation_delay            = 120
+
+  nrql {
+    query = "FROM Transaction, TransactionError SELECT count(*) WHERE appName = '${local.new_relic_app_name}' AND (transactionName LIKE '%/ordens-servico%' OR name LIKE '%/ordens-servico%') AND (http.statusCode >= 500 OR httpResponseCode LIKE '5%' OR eventType() = 'TransactionError')"
+  }
+
+  critical {
+    operator              = "above"
+    threshold             = 0
+    threshold_duration    = 300
+    threshold_occurrences = "AT_LEAST_ONCE"
+  }
+}
+
 resource "newrelic_nrql_alert_condition" "kubernetes_pods_unavailable" {
   count = var.enable_new_relic ? 1 : 0
 
