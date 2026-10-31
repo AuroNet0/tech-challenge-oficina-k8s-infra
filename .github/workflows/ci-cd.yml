@@ -1,14 +1,6 @@
-name: Terraform CI/CD
+name: Terraform CI/CD LEGADO - nao utilizar na Fase 4
 
 on:
-  pull_request:
-    branches:
-      - homolog
-      - main
-  push:
-    branches:
-      - homolog
-      - main
   workflow_dispatch:
 
 env:
@@ -50,7 +42,7 @@ jobs:
     name: Terraform deploy
     runs-on: ubuntu-latest
     needs: terraform-ci
-    if: github.event_name != 'pull_request' && (github.ref_name == 'homolog' || github.ref_name == 'main')
+    if: github.event_name == 'workflow_dispatch' && (github.ref_name == 'homolog' || github.ref_name == 'main')
     environment: ${{ github.ref_name == 'main' && 'production' || 'homolog' }}
     concurrency:
       group: terraform-${{ github.ref_name == 'main' && 'production' || 'homolog' }}

@@ -2,6 +2,9 @@
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+!bootstrap/.terraform.lock.hcl
+!terraform/.terraform.lock.hcl
+!phase4/stacks/*/.terraform.lock.hcl
 crash.log
 *.tfvars
 *.tfvars.json

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "terraform_version": "1.15.8",
+  "environments": {
+    "demo-a": {
+      "enabled": false,
+      "aws_account_id": null,
+      "aws_region": "us-east-1",
+      "project_name": "oficina",
+      "resource_prefix": "tc",
+      "owner": "tech-challenge-oficina",
+      "backend_bucket": null,
+      "state_keys": {
+        "infra": "phase4/environments/demo-a/infra.tfstate",
+        "platform": "phase4/environments/demo-a/platform.tfstate",
+        "edge": "phase4/environments/demo-a/edge.tfstate"
+      }
+    },
+    "demo-b": {
+      "enabled": false,
+      "aws_account_id": null,
+      "aws_region": "us-east-1",
+      "project_name": "oficina",
+      "resource_prefix": "tc",
+      "owner": "tech-challenge-oficina",
+      "backend_bucket": null,
+      "state_keys": {
+        "infra": "phase4/environments/demo-b/infra.tfstate",
+        "platform": "phase4/environments/demo-b/platform.tfstate",
+        "edge": "phase4/environments/demo-b/edge.tfstate"
+      }
+    }
+  }
+}
