@@ -21,7 +21,8 @@ resource "aws_eks_addon" "vpc_cni" {
 }
 
 resource "aws_iam_role" "ebs_csi" {
-  name = "${local.namespace}-ebs-csi"
+  name                 = "${local.namespace}-ebs-csi"
+  permissions_boundary = lookup(var.workload_permissions_boundaries, "ebs-csi", null)
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{

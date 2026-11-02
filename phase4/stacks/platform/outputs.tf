@@ -121,6 +121,9 @@ output "network_controller_contract" {
       mechanism     = "EKS Pod Identity"
       role_name     = "${local.namespace}-load-balancer-controller"
       installed     = false
+      declared      = true
+      enabled       = var.alb_controller_identity_enabled
+      role_arn      = try(aws_iam_role.alb_controller[0].arn, null)
       policy_source = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.0/docs/install/iam_policy.json"
       requirement   = "Scope trust to cluster/kube-system/aws-load-balancer-controller; scope resource tags/VPC; review actions requiring wildcard; attach policy and association before Helm."
     }
@@ -130,6 +133,10 @@ output "network_controller_contract" {
       serviceAccount              = { create = true, name = "aws-load-balancer-controller", automountServiceAccountToken = true }
       enableServiceMutatorWebhook = false
       createIngressClassResource  = false
+      enableShield                = false
+      enableWaf                   = false
+      enableWafv2                 = false
+      enableBackendSecurityGroup  = false
       resources                   = { requests = { cpu = "100m", memory = "128Mi" }, limits = { cpu = "500m", memory = "256Mi" } }
       defaultTags                 = module.environment.contract.tags
     })

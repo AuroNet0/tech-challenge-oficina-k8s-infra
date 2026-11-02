@@ -31,12 +31,14 @@ resource "aws_eks_cluster" "environment" {
 }
 
 resource "aws_eks_access_entry" "administrator" {
-  cluster_name  = aws_eks_cluster.environment.name
-  principal_arn = var.eks_admin_role_arn
-  type          = "STANDARD"
+  cluster_name      = aws_eks_cluster.environment.name
+  principal_arn     = var.eks_admin_role_arn
+  type              = "STANDARD"
+  kubernetes_groups = ["oficina:${var.environment_id}:bootstrap"]
 }
 
 resource "aws_eks_access_policy_association" "administrator" {
+  count         = var.cluster_bootstrap_access_enabled ? 1 : 0
   cluster_name  = aws_eks_cluster.environment.name
   principal_arn = aws_eks_access_entry.administrator.principal_arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"

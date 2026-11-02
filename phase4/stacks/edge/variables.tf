@@ -22,6 +22,15 @@ variable "git_revision" {
   nullable    = false
 }
 
+variable "auth_permissions_boundary_arn" {
+  type    = string
+  default = null
+  validation {
+    condition     = var.auth_permissions_boundary_arn == null ? true : var.auth_permissions_boundary_arn == "arn:aws:iam::${var.aws_account_id}:policy/tc-oficina-p4-${var.environment_id}-auth-lambda-boundary"
+    error_message = "Boundary Auth deve pertencer exatamente a conta/ambiente e finalidade esperados."
+  }
+}
+
 variable "infra_contract" {
   description = "Output platform_contract publico da infra selecionada; nenhum acesso a state remoto."
   type = object({

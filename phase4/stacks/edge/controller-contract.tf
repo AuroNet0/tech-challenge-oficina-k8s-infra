@@ -3,6 +3,8 @@ output "controller_identity_contract" {
   value = {
     installed            = false
     policy_ready_for_aws = false
+    implemented_in       = "phase4/stacks/platform/identities.tf"
+    policy_module        = "phase4/modules/alb-controller-policy"
     role_name            = "${local.name_prefix}-load-balancer-controller"
     role_arn             = "arn:aws:iam::${var.aws_account_id}:role/${local.name_prefix}-load-balancer-controller"
     cluster_name         = local.name_prefix

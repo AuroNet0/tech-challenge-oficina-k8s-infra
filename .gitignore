@@ -5,6 +5,7 @@
 !bootstrap/.terraform.lock.hcl
 !terraform/.terraform.lock.hcl
 !phase4/stacks/*/.terraform.lock.hcl
+!phase4/bootstrap/identities/.terraform.lock.hcl
 crash.log
 *.tfvars
 *.tfvars.json

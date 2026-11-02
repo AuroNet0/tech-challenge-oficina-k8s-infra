@@ -5,7 +5,8 @@ resource "aws_cloudwatch_log_group" "lambda" {
 }
 
 resource "aws_iam_role" "auth" {
-  name = "${local.name_prefix}-auth-lambda"
+  name                 = "${local.name_prefix}-auth-lambda"
+  permissions_boundary = var.auth_permissions_boundary_arn
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]

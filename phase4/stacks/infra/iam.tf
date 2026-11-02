@@ -1,5 +1,6 @@
 resource "aws_iam_role" "cluster" {
-  name = "${local.name_prefix}-eks-cluster"
+  name                 = "${local.name_prefix}-eks-cluster"
+  permissions_boundary = lookup(var.workload_permissions_boundaries, "eks-cluster", null)
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -18,7 +19,8 @@ resource "aws_iam_role_policy_attachment" "cluster" {
 }
 
 resource "aws_iam_role" "nodes" {
-  name = "${local.name_prefix}-eks-nodes"
+  name                 = "${local.name_prefix}-eks-nodes"
+  permissions_boundary = lookup(var.workload_permissions_boundaries, "eks-nodes", null)
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
