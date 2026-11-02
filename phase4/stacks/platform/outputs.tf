@@ -20,7 +20,7 @@ locals {
     }, { for service in ["auth", "os", "billing"] : "${service}-postgres" => {
       keys = ["username", "password"], source = "environment-secret", consumers = ["postgres-bootstrap", service == "auth" ? "auth-internal" : "${service}-service"], temporary = false
       } }, { for service in ["os-service", "execution-service", "billing-service", "auth-internal"] : "${service}-tls" => {
-      keys = ["identity.p12", "truststore.p12", "password"], source = "environment-pki", consumers = [service], temporary = false
+      keys = concat(["identity.p12", "truststore.p12", "password"], service == "auth-internal" ? [] : ["java-options", "inbound-truststore.p12"]), source = "environment-pki", consumers = [service], temporary = false
       } }, { for service in ["os-service", "execution-service", "billing-service"] : "${service}-rabbitmq" => {
       keys = ["username", "password"], source = "environment-secret", consumers = [service], temporary = false
   } })
@@ -34,6 +34,27 @@ output "manifests" {
 output "secret_contract" {
   description = "Nomes/chaves/fontes esperados; nenhum valor secreto e lido ou armazenado no state Terraform."
   value       = local.secret_contract
+}
+
+output "secret_delivery_contract" {
+  description = "Somente metadados operacionais. Geracao e transporte de valores acontecem fora do Terraform."
+  value = {
+    schema_version       = 1
+    environment_id       = var.environment_id
+    namespace            = local.namespace
+    canonical_prefix     = "/oficina/phase4/${var.environment_id}/"
+    bootstrap_source     = var.infra_contract.rds.master_secret_arn
+    ca_canonical_name    = "/oficina/phase4/${var.environment_id}/technical-ca"
+    ca_projected         = false
+    mercado_pago_enabled = var.mercado_pago.enabled
+    secrets = { for name, contract in local.secret_contract : name => {
+      keys      = contract.keys
+      consumers = contract.consumers
+      lifecycle = name == "postgres-bootstrap-admin" ? "bootstrap" : name == "auth-migration-postgres" ? "migration" : endswith(name, "-tls") ? "certificate" : "environment"
+      source    = name == "postgres-bootstrap-admin" ? var.infra_contract.rds.master_secret_arn : name == "rabbitmq-definitions" ? "derived-in-memory" : "/oficina/phase4/${var.environment_id}/${name}"
+    } }
+    live_transport_enabled = false
+  }
 }
 
 output "auth_internal_contract" {

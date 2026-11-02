@@ -95,7 +95,10 @@ for (const resource of resources) {
             assert.equal(pod.containers[0].readinessProbe.httpGet.scheme, 'HTTPS');
             assert.equal(pod.securityContext.runAsUser, 10001);
             assert.equal(pod.terminationGracePeriodSeconds, 45);
-        } else assert.ok(pod.containers[0].command[2].includes('javax.net.ssl.trustStore='));
+        } else {
+            assert.ok(pod.containers[0].command.includes('@/tls/java-options'));
+            assert.ok(!pod.containers[0].command.some(argument => argument.includes('Password=')));
+        }
         assert.ok(!pod.containers[0].env.some(environment => environment.name === 'JAVA_TOOL_OPTIONS'));
     }
     if (resource.kind === 'StatefulSet') {
@@ -108,6 +111,10 @@ assert.equal(changes.auth_internal_contract.after.runtime_available, true);
 assert.equal(changes.auth_internal_contract.after.image_verified, false);
 assert.equal(bundles.migration.items.length, 0);
 const authConfig = resources.find(resource => resource.kind === 'ConfigMap' && resource.metadata.name === 'auth-internal-config').data;
+for (const service of ['os-service', 'execution-service', 'billing-service']) {
+    const config = resources.find(resource => resource.kind === 'ConfigMap' && resource.metadata.name === `${service}-config`).data;
+    assert.equal(config.SERVER_SSL_TRUST_STORE, 'file:/tls/inbound-truststore.p12');
+}
 const authPod = resources.find(resource => resource.kind === 'Deployment' && resource.metadata.name === 'auth-internal').spec.template.spec;
 const authInputs = new Set([...Object.keys(authConfig), ...authPod.containers[0].env.map(environment => environment.name)]);
 for (const input of ['AUTH_INTERNAL_PORT', 'AUTH_INTERNAL_KEYSTORE', 'AUTH_INTERNAL_TRUSTSTORE',

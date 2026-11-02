@@ -9,3 +9,12 @@ crash.log
 *.tfvars
 *.tfvars.json
 .idea/
+__pycache__/
+*.pyc
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.key
+.env
+secrets-runtime/

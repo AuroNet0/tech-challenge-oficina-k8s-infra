@@ -5,7 +5,7 @@ locals {
     SPRING_PROFILES_ACTIVE                     = "mtls"
     SERVER_ADDRESS                             = "0.0.0.0", SERVER_PORT = "8443", SERVER_SSL_ENABLED = "true"
     SERVER_SSL_KEY_STORE                       = "file:/tls/identity.p12", SERVER_SSL_KEY_STORE_TYPE = "PKCS12"
-    SERVER_SSL_TRUST_STORE                     = "file:/tls/truststore.p12", SERVER_SSL_TRUST_STORE_TYPE = "PKCS12"
+    SERVER_SSL_TRUST_STORE                     = "file:/tls/inbound-truststore.p12", SERVER_SSL_TRUST_STORE_TYPE = "PKCS12"
     SERVER_SSL_CLIENT_AUTH                     = "want"
     SPRING_RABBITMQ_HOST                       = "rabbitmq", SPRING_RABBITMQ_PORT = "5672", SPRING_RABBITMQ_VIRTUAL_HOST = "/oficina"
     SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE = "3", SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE = "0"
@@ -74,13 +74,12 @@ locals {
             }]
             containers = [{
               name            = name, image = var.images[service], imagePullPolicy = "IfNotPresent"
-              command         = ["sh", "-ec", "exec java -Xmx384m -XX:ActiveProcessorCount=2 -Djavax.net.ssl.keyStore=/tls/identity.p12 -Djavax.net.ssl.keyStorePassword=\"$TLS_PASSWORD\" -Djavax.net.ssl.trustStore=/tls/truststore.p12 -Djavax.net.ssl.trustStorePassword=\"$TLS_PASSWORD\" -jar /app/app.jar"]
+              command         = ["java", "-Xmx384m", "-XX:ActiveProcessorCount=2", "@/tls/java-options", "-jar", "/app/app.jar"]
               ports           = [{ name = "https", containerPort = 8443 }]
               securityContext = local.security_context
               resources       = { requests = { cpu = "250m", memory = "512Mi" }, limits = { cpu = "1000m", memory = "768Mi" } }
               envFrom         = [{ configMapRef = { name = "${name}-config" } }]
               env = concat([
-                { name = "TLS_PASSWORD", valueFrom = { secretKeyRef = { name = "${name}-tls", key = "password" } } },
                 { name = "SERVER_SSL_KEY_STORE_PASSWORD", valueFrom = { secretKeyRef = { name = "${name}-tls", key = "password" } } },
                 { name = "SERVER_SSL_TRUST_STORE_PASSWORD", valueFrom = { secretKeyRef = { name = "${name}-tls", key = "password" } } }
                 ], [for env, key in { SPRING_RABBITMQ_USERNAME                            = "username", SPRING_RABBITMQ_PASSWORD = "password" } : {

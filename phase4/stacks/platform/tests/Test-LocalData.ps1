@@ -74,6 +74,10 @@ try {
     $null = Invoke-Docker @('exec', $postgres, 'psql', '-U', 'postgres', '-c', 'DROP DATABASE local_billing')
     $firstOutput = Invoke-Docker $bootstrap
     $secondOutput = Invoke-Docker $bootstrap
+    $null = Invoke-Docker @('cp', (Join-Path $scripts 'verify-postgres.sql'), "${postgres}:/tmp/verify-postgres.sql")
+    $postconditions = @($bootstrap)
+    $postconditions[$postconditions.Length - 1] = '/tmp/verify-postgres.sql'
+    $null = Invoke-Docker -Arguments $postconditions -ExpectFailure
     $script:stage = 'Auth MigrateIdentity verify-full with default JDBC CA location'
     $migration = @('run', '--rm', '--label', "oficina.test-owner=$testOwner", '--network', "container:$postgres", '--read-only',
         '--tmpfs', '/tmp:rw,uid=10001,gid=10001', '-e', 'AUTH_DB_HOST=localhost', '-e', 'AUTH_DB_NAME=local_auth', '-e', 'AUTH_DB_PORT=5432',
@@ -82,6 +86,13 @@ try {
     $null = Invoke-Docker -Arguments ($migration + $migratorCommand) -ExpectFailure
     $null = Invoke-Docker ($migration + @('-v', "${caVolume}:/home/auth/.postgresql:ro") + $migratorCommand)
     $null = Invoke-Docker ($migration + @('-v', "${caVolume}:/home/auth/.postgresql:ro") + $migratorCommand)
+    $null = Invoke-Docker $postconditions
+    $null = Invoke-Docker @('exec', $postgres, 'psql', '-U', 'postgres', '-d', 'local_auth', '-c', 'REVOKE UPDATE ON public.usuario_clientes FROM local_auth')
+    $null = Invoke-Docker -Arguments $postconditions -ExpectFailure
+    $null = Invoke-Docker @('exec', $postgres, 'psql', '-U', 'postgres', '-d', 'local_auth', '-c', 'GRANT UPDATE ON public.usuario_clientes TO local_auth')
+    $null = Invoke-Docker $postconditions
+    $checks += 3
+    Write-Output 'PASS PostgreSQL postconditions: rejects missing migration or DML grant; verifies owners, isolation and Auth V1/V2.'
     $checks += 3
     Write-Output 'PASS Auth MigrateIdentity image: PostgreSQL 17 verify-full, mounted JDBC root.crt, V1/V2 migrate/validate and repeat; missing CA rejected.'
     $null = Invoke-Docker @('exec', '-e', 'PGPASSWORD=local-migration-only', $postgres, 'psql', '-h', '127.0.0.1',

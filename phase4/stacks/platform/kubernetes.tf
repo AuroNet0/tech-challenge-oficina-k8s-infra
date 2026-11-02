@@ -28,9 +28,10 @@ locals {
       apiVersion = "v1", kind = "ConfigMap"
       metadata   = merge(local.metadata, { name = "platform-scripts" })
       data = {
-        "mongo-init.js"  = file("${path.module}/scripts/mongo-init.js")
-        "mongo-ready.js" = file("${path.module}/scripts/mongo-ready.js")
-        "bootstrap.sql"  = file("${path.module}/scripts/bootstrap.sql")
+        "mongo-init.js"       = file("${path.module}/scripts/mongo-init.js")
+        "mongo-ready.js"      = file("${path.module}/scripts/mongo-ready.js")
+        "bootstrap.sql"       = file("${path.module}/scripts/bootstrap.sql")
+        "verify-postgres.sql" = file("${path.module}/scripts/verify-postgres.sql")
       }
     },
     {
