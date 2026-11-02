@@ -27,7 +27,7 @@ locals {
         }]
       }
     }
-    ], [for service in ["os-service", "billing-service", "auth-internal", "postgres-bootstrap"] : {
+    ], [for service in ["os-service", "billing-service", "auth-internal", "auth-migrate", "postgres-bootstrap"] : {
       apiVersion = "networking.k8s.io/v1", kind = "NetworkPolicy"
       metadata   = merge(local.metadata, { name = "${service}-postgres" })
       spec = {

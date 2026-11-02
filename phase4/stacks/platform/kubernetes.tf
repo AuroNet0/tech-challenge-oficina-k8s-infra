@@ -37,9 +37,10 @@ locals {
       apiVersion = "v1", kind = "ConfigMap"
       metadata   = merge(local.metadata, { name = "database-config" })
       data = merge({
-        PGHOST        = var.infra_contract.rds.address, PGPORT = "5432"
-        PGDATABASE    = var.infra_contract.rds.bootstrap_database, PGSSLMODE = "verify-full"
-        PGSSLROOTCERT = "/rds-ca/ca.pem"
+        PGHOST                 = var.infra_contract.rds.address, PGPORT = "5432"
+        PGDATABASE             = var.infra_contract.rds.bootstrap_database, PGSSLMODE = "verify-full"
+        PGSSLROOTCERT          = "/rds-ca/ca.pem"
+        AUTH_MIGRATION_DB_USER = local.auth_migration_user
         }, merge([for service, database in var.infra_contract.rds.application_databases : {
           "${upper(service)}_DB_NAME" = database.database
           "${upper(service)}_DB_USER" = database.username
@@ -56,7 +57,7 @@ locals {
         ])
       }
     }
-    ], [for service in ["os-service", "execution-service", "billing-service", "auth-internal", "mongodb", "rabbitmq", "postgres-bootstrap"] : {
+    ], [for service in ["os-service", "execution-service", "billing-service", "auth-internal", "auth-migrate", "mongodb", "rabbitmq", "postgres-bootstrap"] : {
       apiVersion                          = "v1", kind = "ServiceAccount"
       metadata                            = merge(local.metadata, { name = service })
       automountServiceAccountToken        = false
@@ -65,7 +66,7 @@ locals {
       metadata                            = merge(local.metadata, { name = service })
       spec = merge({
         type  = "ClusterIP", selector = { "app.kubernetes.io/name" = service }
-        ports = [{ name = "tcp", port = port, targetPort = port }]
+        ports = [merge({ name = { mongodb = "mongo", rabbitmq = "amqp", auth-internal = "https" }[service], port = port, targetPort = port }, service == "auth-internal" ? { appProtocol = "https" } : {})]
       }, contains(["mongodb", "rabbitmq"], service) ? { clusterIP = "None" } : {}, contains(["mongodb", "rabbitmq"], service) ? { publishNotReadyAddresses = true } : {})
   }])
 
@@ -202,7 +203,7 @@ locals {
             securityContext = local.security_context
             resources       = { requests = { cpu = "100m", memory = "128Mi" }, limits = { cpu = "500m", memory = "256Mi" } }
             envFrom         = [{ configMapRef = { name = "database-config" } }]
-            env = concat([for name, key in { PGUSER = "username", PGPASSWORD = "password" } : {
+            env = concat([{ name = "AUTH_MIGRATION_DB_PASSWORD", valueFrom = { secretKeyRef = { name = "auth-migration-postgres", key = "password" } } }], [for name, key in { PGUSER = "username", PGPASSWORD = "password" } : {
               name = name, valueFrom = { secretKeyRef = { name = "postgres-bootstrap-admin", key = key } }
               }], [for service in ["auth", "os", "billing"] : {
               name = "${upper(service)}_DB_PASSWORD", valueFrom = { secretKeyRef = { name = "${service}-postgres", key = "password" } }

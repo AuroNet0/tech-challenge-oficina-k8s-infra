@@ -69,8 +69,12 @@ resource "terraform_data" "platform_guard" {
       error_message = "Platform bloqueada: catalogo ou identidade/cluster/VPC/subnets do contrato nao correspondem ao ambiente esperado."
     }
     precondition {
-      condition     = var.application_replicas == 0 || (var.jwt != null && var.auth_internal_runtime_approved && var.bootstrap_completed && var.secrets_delivered && var.network_policy_enforced)
+      condition     = var.application_replicas == 0 || (var.jwt != null && var.images.auth != null && var.auth_image_verified && var.auth_migration_completed && var.auth_internal_runtime_approved && var.bootstrap_completed && var.secrets_delivered && var.network_policy_enforced)
       error_message = "Aplicacoes bloqueadas: confirmar runtime Auth produtivo, bootstrap, secrets e enforcement de NetworkPolicy antes de iniciar replicas."
+    }
+    precondition {
+      condition     = !var.auth_migration_enabled || (var.images.auth != null && var.auth_image_verified && var.bootstrap_completed && var.secrets_delivered && var.network_policy_enforced)
+      error_message = "Migracao Auth bloqueada: imagem real verificada, bootstrap, CA/Secrets e dataplane sao obrigatorios."
     }
   }
 }

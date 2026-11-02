@@ -11,6 +11,13 @@ const rendered = events.find(event => event.type === 'test_plan' && event['@test
 assert.ok(rendered, 'A successful render test with verbose JSON output is required');
 assert.ok(events.some(event => event.type === 'test_summary' && event.test_summary.failed === 0));
 const changes = rendered.test_plan.output_changes;
+const migrationRun = events.find(event => event.type === 'test_plan' && event['@testrun'] === 'render_controlled_migration');
+const migrationBundle = JSON.parse(migrationRun.test_plan.output_changes.manifests.after.migration);
+assert.equal(migrationBundle.items[0].spec.completions, 1);
+const migrationPod = migrationBundle.items[0].spec.template.spec;
+assert.equal(migrationPod.containers[0].env.find(environment => environment.name === 'AUTH_DB_USER').valueFrom.secretKeyRef.name, 'auth-migration-postgres');
+assert.ok(!migrationPod.containers[0].env.some(environment => environment.name === 'AUTH_DB_SSLROOTCERT'));
+assert.deepEqual(migrationPod.volumes[0].configMap.items, [{ key: 'ca.pem', path: 'root.crt' }]);
 const bundles = Object.fromEntries(Object.entries(changes.manifests.after).map(([name, text]) => [name, JSON.parse(text)]));
 const resources = Object.values(bundles).flatMap(bundle => {
     assert.equal(bundle.apiVersion, 'v1');
@@ -42,7 +49,6 @@ for (const resource of resources) {
     }
     if (resource.kind === 'ServiceAccount') assert.equal(resource.automountServiceAccountToken, false);
     if (!['Deployment', 'StatefulSet', 'Job'].includes(resource.kind)) continue;
-    assert.notEqual(resource.metadata.name, 'auth-internal');
     const pod = resource.spec.template.spec;
     assert.ok(serviceAccounts.has(pod.serviceAccountName));
     assert.equal(pod.automountServiceAccountToken, false);
@@ -81,7 +87,15 @@ for (const resource of resources) {
     if (resource.kind === 'Deployment') {
         assert.equal(resource.spec.replicas, 0);
         assert.equal(resource.spec.strategy.type, 'Recreate');
-        assert.ok(pod.containers[0].command[2].includes('javax.net.ssl.trustStore='));
+        if (resource.metadata.name === 'auth-internal') {
+            assert.equal(pod.containers[0].command, undefined);
+            assert.equal(pod.containers[0].args, undefined);
+            assert.equal(pod.containers[0].livenessProbe.httpGet.path, '/health/live');
+            assert.equal(pod.containers[0].readinessProbe.httpGet.path, '/health/ready');
+            assert.equal(pod.containers[0].readinessProbe.httpGet.scheme, 'HTTPS');
+            assert.equal(pod.securityContext.runAsUser, 10001);
+            assert.equal(pod.terminationGracePeriodSeconds, 45);
+        } else assert.ok(pod.containers[0].command[2].includes('javax.net.ssl.trustStore='));
         assert.ok(!pod.containers[0].env.some(environment => environment.name === 'JAVA_TOOL_OPTIONS'));
     }
     if (resource.kind === 'StatefulSet') {
@@ -90,9 +104,25 @@ for (const resource of resources) {
         assert.equal(resource.spec.volumeClaimTemplates[0].spec.storageClassName, `${namespace}-gp3`);
     }
 }
-assert.equal(changes.auth_internal_contract.after.runtime_available, false);
+assert.equal(changes.auth_internal_contract.after.runtime_available, true);
+assert.equal(changes.auth_internal_contract.after.image_verified, false);
+assert.equal(bundles.migration.items.length, 0);
+const authConfig = resources.find(resource => resource.kind === 'ConfigMap' && resource.metadata.name === 'auth-internal-config').data;
+const authPod = resources.find(resource => resource.kind === 'Deployment' && resource.metadata.name === 'auth-internal').spec.template.spec;
+const authInputs = new Set([...Object.keys(authConfig), ...authPod.containers[0].env.map(environment => environment.name)]);
+for (const input of ['AUTH_INTERNAL_PORT', 'AUTH_INTERNAL_KEYSTORE', 'AUTH_INTERNAL_TRUSTSTORE',
+    'AUTH_INTERNAL_KEYSTORE_PASSWORD', 'AUTH_INTERNAL_TRUSTSTORE_PASSWORD', 'AUTH_INTERNAL_OS_SUBJECT',
+    'AUTH_INTERNAL_PROBE_HOST', 'AUTH_DB_HOST', 'AUTH_DB_PORT', 'AUTH_DB_NAME', 'AUTH_DB_USER', 'AUTH_DB_PASSWORD',
+    'AUTH_DB_SSLMODE', 'AUTH_DB_SSLROOTCERT', 'AUTH_INTERNAL_DB_POOL_SIZE', 'AUTH_JWT_ISSUER', 'AUTH_JWT_AUDIENCE', 'AUTH_JWKS_URI']) {
+    assert.ok(authInputs.has(input), `Missing productive Auth input: ${input}`);
+}
+assert.equal(authConfig.AUTH_INTERNAL_OS_SUBJECT, 'CN=os-service');
+assert.equal(authConfig.AUTH_DB_SSLMODE, 'verify-full');
+assert.equal(authConfig.AUTH_INTERNAL_PROBE_HOST, `auth-internal.${namespace}.svc.cluster.local`);
+assert.equal(authConfig.AUTH_JWKS_URI, 'https://auth.test.example.org/.well-known/jwks.json');
+assert.ok(!Object.keys(authConfig).some(key => /PASSWORD|PRIVATE|KEY_PROVIDER|KEY_SECRET/.test(key)));
 assert.equal(changes.edge_contract.after.listener_ready, false);
-assert.equal(resources.filter(resource => resource.kind === 'Deployment').length, 3);
+assert.equal(resources.filter(resource => resource.kind === 'Deployment').length, 4);
 assert.equal(resources.filter(resource => resource.kind === 'StatefulSet').length, 2);
 assert.ok(resources.some(resource => resource.kind === 'NetworkPolicy' && resource.metadata.name === 'default-deny'));
 assert.ok(!resources.some(resource => resource.kind === 'NetworkPolicy' && resource.metadata.name === 'execution-service-postgres'));
@@ -162,6 +192,7 @@ if (process.argv[3]) {
         fs.writeFileSync(path.join(process.argv[3], `${name}.fixture.json`), JSON.stringify(bundle, null, 2) + '\n');
     }
     fs.writeFileSync(path.join(process.argv[3], 'TEST-FIXTURES-ONLY.txt'), 'Synthetic images, account and URLs. Never deploy these test fixtures.\n');
+    fs.writeFileSync(path.join(process.argv[3], 'migration-enabled.fixture.json'), JSON.stringify(migrationBundle, null, 2) + '\n');
 }
 console.log(`PASS: ${resources.length} rendered Kubernetes objects; security, references, images and six MongoDB script scenarios.`);
-console.log(`One replica per business service plus MongoDB/RabbitMQ: requests ${requestsCpu}m CPU / ${requestsMemory}Mi RAM; excludes Auth/controllers/observability/system.`);
+console.log(`One replica per service including Auth plus MongoDB/RabbitMQ: requests ${requestsCpu}m CPU / ${requestsMemory}Mi RAM; excludes controllers/observability/system.`);

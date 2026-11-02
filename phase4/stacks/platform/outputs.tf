@@ -5,9 +5,12 @@ locals {
     data         = [local.mongodb, local.rabbitmq]
     bootstrap    = [local.postgres_bootstrap]
     applications = slice(local.application_manifests, 0, var.jwt == null ? 0 : length(local.application_manifests))
+    auth         = slice(local.auth_manifests, 0, var.jwt == null || var.images.auth == null ? 0 : length(local.auth_manifests))
+    migration    = slice([local.auth_migration], 0, var.auth_migration_enabled ? 1 : 0)
   }
   secret_contract = merge({
     "postgres-bootstrap-admin" = { keys = ["username", "password"], source = var.infra_contract.rds.master_secret_arn, consumers = ["postgres-bootstrap"], temporary = true }
+    "auth-migration-postgres"  = { keys = ["username", "password"], source = "environment-secret", consumers = ["postgres-bootstrap", "auth-migrate"], temporary = true }
     "mongodb-admin"            = { keys = ["username", "password"], source = "environment-secret", consumers = ["mongodb"], temporary = false }
     "mongodb-keyfile"          = { keys = ["keyfile"], source = "environment-secret", consumers = ["mongodb"], temporary = false }
     "execution-mongodb"        = { keys = ["username", "password"], source = "environment-secret", consumers = ["execution-service", "mongodb"], temporary = false }
@@ -35,8 +38,13 @@ output "secret_contract" {
 
 output "auth_internal_contract" {
   value = {
-    runtime_available           = false
-    deployment_declared         = false
+    runtime_available           = true
+    deployment_declared         = true
+    deployment_rendered         = var.jwt != null && var.images.auth != null
+    image_verified              = var.auth_image_verified
+    migration_completed         = var.auth_migration_completed
+    enabled                     = var.application_replicas > 0
+    source_revision             = "dd10bbd3a31d2148ce111a996b908a48379bc3ba"
     service                     = "auth-internal.${local.namespace}.svc.cluster.local"
     port                        = 8443
     path                        = "/internal/v1/identity/client-access/check"
@@ -44,7 +52,8 @@ output "auth_internal_contract" {
     database                    = var.infra_contract.rds.application_databases.auth.database
     user                        = var.infra_contract.rds.application_databases.auth.username
     public_signing_key_required = false
-    blocked_reason              = "AuthLocalRuntime e exclusivo de E2E. Implementar/testar adapter produtivo no repositorio Auth antes de iniciar aplicacoes."
+    migration_user              = local.auth_migration_user
+    blocked_reason              = "Replicas zero ate imagem ECR verificada, PKI/Secrets, bootstrap/migracao e dataplane validados no ambiente. Flags sao atestacoes externas, nao evidencia automatica."
   }
 }
 
@@ -57,9 +66,9 @@ output "mtls_contract" {
       subject  = "CN=${service}"
       dns_sans = [service, "${service}.${local.namespace}.svc.cluster.local"]
       secret   = "${service}-tls"
-      eku      = ["serverAuth", "clientAuth"]
+      eku      = service == "auth-internal" ? ["serverAuth"] : ["serverAuth", "clientAuth"]
     } }
-    truststore_contents = "JRE public roots plus this environment's private CA; never only the E2E CA"
+    truststore_contents = "Auth inbound /tls/truststore.p12: ONLY environment technical CA. Auth outbound JWKS: unmodified JRE public roots. OS JSSE outbound store: JRE public roots plus environment CA."
   }
 }
 
@@ -85,7 +94,25 @@ output "network_controller_contract" {
     private_subnet_ids     = [for subnet in var.infra_contract.private_subnets : subnet.id]
     node_security_group_id = var.infra_contract.security_groups.nodes
     required_scheme        = "internal"
-    remaining_work         = "Review and scope controller IAM policy, pin chart/images, declare Helm release and strict ALB-to-pod rules before creating private Ingress."
+    chart_version          = "1.14.0"
+    controller_version     = "v2.14.0"
+    identity = {
+      mechanism     = "EKS Pod Identity"
+      role_name     = "${local.namespace}-load-balancer-controller"
+      installed     = false
+      policy_source = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.0/docs/install/iam_policy.json"
+      requirement   = "Scope trust to cluster/kube-system/aws-load-balancer-controller; scope resource tags/VPC; review actions requiring wildcard; attach policy and association before Helm."
+    }
+    values_yaml = yamlencode({
+      clusterName                 = local.namespace, region = var.aws_region, vpcId = var.infra_contract.vpc_id
+      replicaCount                = 1
+      serviceAccount              = { create = true, name = "aws-load-balancer-controller", automountServiceAccountToken = true }
+      enableServiceMutatorWebhook = false
+      createIngressClassResource  = false
+      resources                   = { requests = { cpu = "100m", memory = "128Mi" }, limits = { cpu = "500m", memory = "256Mi" } }
+      defaultTags                 = module.environment.contract.tags
+    })
+    remaining_work = "Review and scope controller IAM policy, pin chart/images, declare Helm release and strict ALB-to-pod rules before creating private Ingress."
   }
 }
 
@@ -106,18 +133,23 @@ output "edge_contract" {
 
 output "observability" {
   value = {
-    namespace   = "${local.namespace}-observability"
-    chart       = "nri-bundle"
-    repository  = "https://helm-charts.newrelic.com"
-    version     = var.new_relic_chart_version
-    secret_name = "newrelic-license"
-    secret_keys = ["licenseKey"]
+    installed                      = false
+    iam_required                   = false
+    service_accounts               = "Chart-created per component with Kubernetes RBAC; token needed for API/kubelet. Separate observability namespace, never application SAs."
+    namespace_security_requirement = "Review chart hostPath/privileged agents before installing outside restricted business namespace. No blanket exemption for business pods."
+    namespace                      = "${local.namespace}-observability"
+    chart                          = "nri-bundle"
+    repository                     = "https://helm-charts.newrelic.com"
+    version                        = var.new_relic_chart_version
+    secret_name                    = "newrelic-license"
+    secret_keys                    = ["licenseKey"]
     values_yaml = yamlencode({
       global = { cluster = local.namespace, customSecretName = "newrelic-license", customSecretLicenseKey = "licenseKey", lowDataMode = true }
       "newrelic-infrastructure" = {
-        enabled = true
-        kubelet = { kubelet = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } }, agent = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } } }
-        ksm     = { ksm = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } }, forwarder = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } } }
+        enabled      = true
+        kubelet      = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } }
+        controlPlane = { enabled = false }
+        ksm          = { ksm = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } }, forwarder = { resources = { requests = { cpu = "50m", memory = "64Mi" }, limits = { memory = "256Mi" } } } }
       }
       "kube-state-metrics"     = { enabled = true, resources = { requests = { cpu = "25m", memory = "48Mi" }, limits = { memory = "128Mi" } } }
       "newrelic-logging"       = { enabled = true, resources = { requests = { cpu = "50m", memory = "128Mi" }, limits = { memory = "256Mi" } } }

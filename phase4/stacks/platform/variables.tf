@@ -59,22 +59,31 @@ variable "infra_contract" {
       alltrue([for database in var.infra_contract.rds.application_databases : can(regex("^[a-z][a-z0-9_]{0,62}$", database.database)) && can(regex("^[a-z][a-z0-9_]{0,62}$", database.username))]) &&
       length(distinct([for database in var.infra_contract.rds.application_databases : database.database])) == 3 &&
       length(distinct([for database in var.infra_contract.rds.application_databases : database.username])) == 3
+      && length(var.infra_contract.rds.application_databases.auth.username) <= 54
+      && !contains([for database in var.infra_contract.rds.application_databases : database.username], "${var.infra_contract.rds.application_databases.auth.username}_migrator")
     )
     error_message = "Contrato RDS/ECR invalido, bancos/usuarios nao exclusivos ou identificador inseguro."
   }
 }
 
 variable "images" {
-  description = "Imagens imutaveis por digest; tres ECR do ambiente e imagens verificadas de MongoDB, RabbitMQ e bootstrap PostgreSQL. Sem latest ou SHA ficticio em deploy."
-  type        = object({ os = string, execution = string, billing = string, mongodb = string, rabbitmq = string, postgres = string })
+  description = "Imagens imutaveis por digest; quatro ECR do ambiente e imagens verificadas de MongoDB, RabbitMQ e PostgreSQL 17. Auth null omite Deployment/migracao. Fixtures nao comprovam imagem real."
+  type        = object({ os = string, execution = string, billing = string, auth = optional(string), mongodb = string, rabbitmq = string, postgres = string })
   nullable    = false
 
   validation {
-    condition = alltrue([for image in values(var.images) : can(regex("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$", image))]) && alltrue([
+    condition = alltrue([for service, image in var.images : image == null ? service == "auth" : can(regex("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$", image))]) && alltrue([
       for service in ["os", "execution", "billing"] :
       startswith(var.images[service], "${var.aws_account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${var.infra_contract.name_prefix}-${service}@sha256:")
     ])
     error_message = "Todas as imagens exigem digest SHA256; servicos devem usar o ECR exato deste ambiente."
+  }
+
+  validation {
+    condition = var.images.auth == null ? true : can(regex(
+      "^${var.aws_account_id}\\.dkr\\.ecr\\.${var.aws_region}\\.amazonaws\\.com/${var.infra_contract.name_prefix}-auth@sha256:[0-9a-f]{64}$", var.images.auth
+    ))
+    error_message = "Auth exige digest SHA256 no ECR auth exato do ambiente; nao use tags ou imagens de outro ambiente."
   }
 }
 
@@ -106,7 +115,7 @@ variable "addon_versions" {
 }
 
 variable "application_replicas" {
-  description = "Zero por padrao: Auth interno ainda nao tem runtime produtivo aprovado. Uma replica exige todos os preflight acknowledgements."
+  description = "Zero por padrao. Uma replica exige imagem Auth verificada, migracao da release e todos os preflight acknowledgements."
   type        = number
   default     = 0
   validation {
@@ -133,6 +142,24 @@ variable "secrets_delivered" {
 variable "network_policy_enforced" {
   type    = bool
   default = false
+}
+
+variable "auth_image_verified" {
+  description = "Confirmacao externa de digest existente, proveniencia dd10bbd e testes da imagem; formato nao comprova existencia."
+  type        = bool
+  default     = false
+}
+
+variable "auth_migration_completed" {
+  description = "Confirmar Job desta release concluido antes de disponibilizar Lambda e Auth interno."
+  type        = bool
+  default     = false
+}
+
+variable "auth_migration_enabled" {
+  description = "Somente renderiza o Job controlado, apos imagem verificada, bootstrap, CA e Secrets entregues."
+  type        = bool
+  default     = false
 }
 
 variable "new_relic_chart_version" {

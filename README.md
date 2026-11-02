@@ -11,6 +11,7 @@ validada na AWS. Os ambientes do catálogo estão bloqueados para operação.
 - [Relatório de validação e Git](docs/9.2.2-A-validacao.md)
 - [Infraestrutura AWS efêmera — Etapa 9.2.2-B](docs/9.2.2-B-infraestrutura.md)
 - [Platform Kubernetes — Etapa 9.2.3](docs/9.2.3-platform-kubernetes.md)
+- [Integração Auth/Platform e validação local — Etapa 9.2.3.2](docs/9.2.3.2-integracao-platform.md)
 
 O workflow legado `ci-cd.yml` aceita somente `workflow_dispatch`; os gatilhos
 automáticos foram removidos. Ele contém `apply` da infraestrutura legada e não
