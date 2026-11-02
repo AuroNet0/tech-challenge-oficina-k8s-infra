@@ -1,0 +1,16 @@
+#!/bin/bash
+set +x
+set -euo pipefail
+ulimit -c 0
+unset AUTH_DB_PASSWORD
+if ! AUTH_DB_PASSWORD="$(/var/lang/bin/java -cp '/opt/java/lib/*' oficina.edge.AuthDatabaseBootstrap 2>/dev/null)"; then
+  printf '%s\n' 'Auth database bootstrap unavailable' >&2
+  exit 1
+fi
+if [[ ! "$AUTH_DB_PASSWORD" =~ ^[A-Za-z0-9_-]{32,128}$ ]]; then
+  unset AUTH_DB_PASSWORD
+  printf '%s\n' 'Auth database bootstrap unavailable' >&2
+  exit 1
+fi
+export AUTH_DB_PASSWORD
+exec "$@"
