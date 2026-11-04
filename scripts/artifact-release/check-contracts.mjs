@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const read = path => fs.readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+const catalog = JSON.parse(read('phase4/environments/catalog.json'));
+for (const environment of Object.values(catalog.environments)) assert.equal(environment.enabled, false);
+const ecr = read('phase4/stacks/infra/ecr.tf');
+assert.match(ecr, /toset\(\["os", "execution", "billing", "auth"\]\)/);
+assert.match(ecr, /image_tag_mutability\s*= "IMMUTABLE"/);
+const platform = read('phase4/stacks/platform/variables.tf');
+assert.ok(platform.includes('@sha256:'));
+assert.ok(platform.includes('-auth@sha256:'));
+const edge = read('phase4/stacks/edge/variables.tf');
+for (const field of ['version_id', 'sha256_base64', 'bootstrap_layer_arn', 'bootstrap_revision']) assert.ok(edge.includes(field));
+const runtime = read('phase4/stacks/edge/lambda.tf');
+assert.match(runtime, /runtime\s*= "java21"/);
+assert.match(runtime, /architectures\s*= \["x86_64"\]/);
+assert.ok(runtime.includes('br.com.fiap.oficina.auth.handler.AuthHandler::handleRequest'));
+assert.ok(runtime.includes('/opt/bin/auth-bootstrap'));
+const identities = read('phase4/bootstrap/identities/operations.tf');
+assert.ok(identities.includes('NeverOpenClusterDirectly'));
+const recovery = read('phase4/modules/endpoint-recovery/main.tf');
+assert.match(recovery, /enabled\s*= false, recovery_verified = false/);
+console.log('Artifact/Terraform compatibility: 16 offline assertions passed; environments and endpoint remain blocked.');

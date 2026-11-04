@@ -1,0 +1,10 @@
+{
+  "scope": {"environment_id": "demo-a", "account": "123456789012", "region": "us-east-1"},
+  "infra_revision": "f95d08e9c179b0f9cc78546c46ecf9b017493582",
+  "applications": {
+    "auth": {"repository": "AuroNet0/tech-challenge-oficina-auth", "revision": "dd10bbd3a31d2148ce111a996b908a48379bc3ba"},
+    "os": {"repository": "AuroNet0/tech-challenge-oficina-os-service", "revision": "9391d3b9d4a5949a2c6447fc01becbb87d45142e"},
+    "execution": {"repository": "AuroNet0/tech-challenge-oficina-execution-service", "revision": "929c6de05e6b482d82fd097e6cd61ac1d38f9b30"},
+    "billing": {"repository": "AuroNet0/tech-challenge-oficina-billing-service", "revision": "c87c72f69c44978ff1211e19c582dd0c6ec2a6ad"}
+  }
+}
