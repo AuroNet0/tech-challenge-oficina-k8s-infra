@@ -180,27 +180,89 @@ def maven_evidence(workspace, pending_internal_image=False):
             "command": "mvn -o -B -ntp clean verify"}
 
 
-def zip_contents(path, budget=None):
-    content = path if isinstance(path, bytes) else Path(path).read_bytes()
-    require(0 < len(content) <= 250 * 1024 * 1024, "PACKAGE_SIZE_REJECTED")
-    budget = [250 * 1024 * 1024] if budget is None else budget
+NETTY_HANDLER_SHA256 = "4df11c7520b556c5e2c84b939182699d48fcbb09e97a6bb5e1c0b6835227d126"
+NETTY_PROBING_KEY_SHA256 = "67153216753676a99069a64f0986ef7015efed5eca8d545261c6c1aa9e9117c8"
+NETTY_CLASS_SHA256 = {
+    "io/netty/handler/ssl/SslUtils.class": "ac727f21b9e766055e84ea47e6ba1ba4ff3493499e28094613e0c5c68fe6a1a0",
+    "io/netty/handler/ssl/OpenSsl.class": "ba993d60099c96e3cc110cfb64002417a13661ffb7dc72bc6a78a64ea5499624",
+    "io/netty/handler/ssl/JdkSslServerContext.class": "df7257ef515c2ad574a4059a973375429f26976515339c23ecbdbe0962f12de1",
+}
+NETTY_APPLICATIONS = {
+    REPOSITORIES["os"]: "com.oficina.os.OsApplication",
+    REPOSITORIES["execution"]: "com.oficina.execution.ExecutionApplication",
+    REPOSITORIES["billing"]: "com.oficina.billing.BillingApplication",
+}
+
+
+def _netty_application(archive, source_repository):
+    application = NETTY_APPLICATIONS.get(source_repository)
+    if application is None:
+        return False
+    required = "BOOT-INF/classes/" + application.replace(".", "/") + ".class"
+    if required not in archive.namelist() or "META-INF/MANIFEST.MF" not in archive.namelist():
+        return False
+    bytecode = archive.read(required)
+    manifest = archive.read("META-INF/MANIFEST.MF")
+    return (bytecode.startswith(b"\xca\xfe\xba\xbe\x00\x00\x00\x41")
+            and re.findall(rb"(?m)^Start-Class: ([^\r\n]+)\r?$", manifest) == [application.encode()]
+            and re.findall(rb"(?m)^Main-Class: ([^\r\n]+)\r?$", manifest)
+            == [b"org.springframework.boot.loader.launch.JarLauncher"])
+
+
+def _netty_dependency(name, content):
+    if name != "BOOT-INF/lib/netty-handler-4.2.17.Final.jar" or digest(content) != NETTY_HANDLER_SHA256:
+        return False
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        names = archive.namelist()
-        require(len(names) == len(set(names)), "DUPLICATE_ARCHIVE_ENTRY")
-        budget[0] -= sum(item.file_size for item in archive.infolist())
-        require(budget[0] >= 0, "UNPACKED_SIZE_REJECTED")
-        contents = {}
-        for item in archive.infolist():
-            name = PurePosixPath(item.filename)
-            require(not name.is_absolute() and ".." not in name.parts and "\\" not in item.filename, "UNSAFE_PACKAGE_PATH")
-            require(not stat.S_ISLNK(item.external_attr >> 16), "UNSAFE_PACKAGE_PATH")
-            if not item.is_dir():
-                content = archive.read(item)
-                scan(item.filename, content)
-                if item.filename.endswith(".jar"):
-                    zip_contents(content, budget)
-                contents[item.filename] = (content, item.external_attr >> 16)
-        return contents
+        metadata = archive.read("META-INF/maven/io.netty/netty-handler/pom.properties").decode("utf-8")
+    properties = {}
+    for line in metadata.splitlines():
+        if line and not line.startswith(("#", "!")):
+            require("=" in line, "NETTY_METADATA_REJECTED")
+            name, value = line.split("=", 1)
+            require(name not in properties, "NETTY_METADATA_REJECTED")
+            properties[name] = value
+    return properties == {"groupId": "io.netty", "artifactId": "netty-handler", "version": "4.2.17.Final"}
+
+
+def _scan_netty_fixture(name, content):
+    if NETTY_CLASS_SHA256.get(name) != digest(content):
+        scan(name, content)
+        return
+    payloads = re.findall(rb"-----BEGIN " + rb"PRIVATE KEY-----\s*[A-Za-z0-9+/=\r\n]+-----END PRIVATE KEY-----", content)
+    require(len(payloads) == 1 and digest(payloads[0]) == NETTY_PROBING_KEY_SHA256, "NETTY_FIXTURE_REJECTED")
+    scan(name, content.replace(payloads[0], b"PUBLIC_NETTY_PROBING_FIXTURE", 1))
+
+
+def zip_contents(path, budget=None, source_repository=None):
+    content = path if isinstance(path, bytes) else Path(path).read_bytes()
+    budget = [250 * 1024 * 1024] if budget is None else budget
+
+    def inspect_archive(content, root=False, netty_dependency=False):
+        require(0 < len(content) <= 250 * 1024 * 1024, "PACKAGE_SIZE_REJECTED")
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = archive.namelist()
+            require(len(names) == len(set(names)), "DUPLICATE_ARCHIVE_ENTRY")
+            budget[0] -= sum(item.file_size for item in archive.infolist())
+            require(budget[0] >= 0, "UNPACKED_SIZE_REJECTED")
+            application = root and _netty_application(archive, source_repository)
+            contents = {}
+            for item in archive.infolist():
+                name = PurePosixPath(item.filename)
+                require(not name.is_absolute() and ".." not in name.parts and "\\" not in item.filename, "UNSAFE_PACKAGE_PATH")
+                require(not stat.S_ISLNK(item.external_attr >> 16), "UNSAFE_PACKAGE_PATH")
+                if not item.is_dir():
+                    payload = archive.read(item)
+                    if netty_dependency and item.filename in NETTY_CLASS_SHA256:
+                        _scan_netty_fixture(item.filename, payload)
+                    else:
+                        scan(item.filename, payload)
+                    if item.filename.endswith(".jar"):
+                        approved_dependency = application and _netty_dependency(item.filename, payload)
+                        inspect_archive(payload, netty_dependency=approved_dependency)
+                    contents[item.filename] = (payload, item.external_attr >> 16)
+            return contents
+
+    return inspect_archive(content, root=True)
 
 
 def verify_jar(path, helper=False):
@@ -286,7 +348,7 @@ def build_app(service, repository_path, source_revision, output, git="git", mave
         require(candidates[0].name == "tech-challenge-oficina-auth.jar", "AUTH_JAR_NAME_CHANGED")
         verify_jar(candidates[0])
     else:
-        zip_contents(candidates[0])
+        zip_contents(candidates[0], source_repository=REPOSITORIES[service])
     shutil.copyfile(candidates[0], output / "application.jar")
     receipt = {"schema_version": 1, "service": service,
                "source": {"repository": REPOSITORIES[service], "revision": source_revision},
@@ -337,7 +399,7 @@ def verify_image_archive(path, service, source_revision, image_id):
                         content = layer_archive.extractfile(member).read()
                         scan(member.name, content)
                         if member.name.endswith(".jar"):
-                            zip_contents(content)
+                            zip_contents(content, source_repository=REPOSITORIES[service] if member.name == "app/app.jar" else None)
 
 
 def verify_layer(path, ca_policy, fixture=False):
