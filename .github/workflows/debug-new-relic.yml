@@ -1,0 +1,136 @@
+name: Debug New Relic
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Debug mode to run."
+        required: true
+        default: diagnose
+        type: choice
+        options:
+          - diagnose
+          - deploy-helm
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform
+  EKS_CLUSTER_NAME: tech-challenge-oficina
+
+jobs:
+  debug-new-relic:
+    name: Debug New Relic
+    runs-on: ubuntu-latest
+    environment: homolog
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME"
+
+      - name: Diagnose EKS and New Relic
+        run: |
+          kubectl get nodes -o wide
+          kubectl describe nodes
+          kubectl get pods -A -o wide
+
+          kubectl get daemonset aws-node -n kube-system -o wide
+          kubectl get pods -n kube-system -l k8s-app=aws-node -o wide
+          kubectl logs -n kube-system -l k8s-app=aws-node -c aws-node --tail=300 --prefix=true || true
+
+          kubectl get namespace newrelic || true
+          kubectl get pods -n newrelic -o wide || true
+          kubectl get events -n newrelic --sort-by=.lastTimestamp || true
+
+          helm status newrelic-bundle -n newrelic || true
+          helm list -n newrelic || true
+
+          kubectl get nodes -o custom-columns=NAME:.metadata.name,PODS:.status.allocatable.pods,CPU:.status.allocatable.cpu,MEMORY:.status.allocatable.memory
+
+          kubectl get pods -A -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
+            | sed '/^$/d' \
+            | sort \
+            | uniq -c \
+            | awk '{print $2 ": " $1 " pods"}'
+
+      - name: Stop after diagnosis
+        if: inputs.mode == 'diagnose'
+        run: echo "Diagnosis complete. No deployment requested."
+
+      - name: Prepare New Relic license Secret
+        if: inputs.mode == 'deploy-helm'
+        env:
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+        run: |
+          if [ -z "$NEW_RELIC_LICENSE_KEY" ]; then
+            echo "NEW_RELIC_LICENSE_KEY environment secret is required for deploy-helm mode."
+            exit 1
+          fi
+
+          kubectl create namespace newrelic \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+          kubectl create secret generic newrelic-license \
+            --namespace newrelic \
+            --from-literal=licenseKey="$NEW_RELIC_LICENSE_KEY" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Terraform init
+        if: inputs.mode == 'deploy-helm'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform apply New Relic Helm only
+        if: inputs.mode == 'deploy-helm'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
+          TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
+        run: |
+          terraform apply \
+            -target='helm_release.new_relic[0]' \
+            -auto-approve \
+            -var="enable_api_gateway=${{ vars.ENABLE_API_GATEWAY }}" \
+            -var="api_backend_url=${{ vars.API_BACKEND_URL }}" \
+            -var="enable_new_relic=true" \
+            -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" \
+            -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}" || {
+              helm status newrelic-bundle -n newrelic || true
+              helm get all newrelic-bundle -n newrelic || true
+
+              kubectl get pods -n newrelic -o wide || true
+              kubectl describe pods -n newrelic || true
+              kubectl get events -n newrelic --sort-by=.lastTimestamp || true
+
+              kubectl get pods -n kube-system -l k8s-app=aws-node -o wide || true
+              kubectl logs -n kube-system -l k8s-app=aws-node -c aws-node --tail=500 --prefix=true || true
+
+              kubectl get events -A --sort-by=.lastTimestamp || true
+              exit 1
+            }
