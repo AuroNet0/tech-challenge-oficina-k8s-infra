@@ -1,0 +1,3 @@
+lambda-bootstrap/bin/auth-bootstrap text eol=lf
+tests/*.sh text eol=lf
+tests/fake-bootstrap-java text eol=lf

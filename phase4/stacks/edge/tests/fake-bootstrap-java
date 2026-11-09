@@ -1,0 +1,6 @@
+#!/bin/bash
+if [[ "${SYNTHETIC_BOOTSTRAP_FAIL:-false}" == true ]]; then
+  printf '%s' "$SYNTHETIC_BOOTSTRAP_PASSWORD" >&2
+  exit 1
+fi
+printf '%s' "$SYNTHETIC_BOOTSTRAP_PASSWORD"

@@ -1,0 +1,327 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import net from 'node:net';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const prefix = 'tc-oficina-p4-demo-a';
+const allowed = new Set([
+  'sts get-caller-identity', 'freetier get-account-plan-state',
+  's3api head-bucket', 's3api get-bucket-location', 's3api get-bucket-versioning',
+  's3api get-bucket-encryption', 's3api get-public-access-block', 's3api list-objects-v2', 's3api get-object',
+  'iam get-open-id-connect-provider', 'iam get-role',
+  'eks describe-cluster-versions', 'eks describe-cluster', 'eks list-clusters', 'eks describe-nodegroup',
+  'rds describe-db-engine-versions', 'rds describe-orderable-db-instance-options', 'rds describe-db-instances',
+  'ec2 describe-availability-zones', 'ec2 describe-instance-types', 'ec2 describe-instance-type-offerings',
+  'ec2 describe-instances', 'ec2 describe-vpcs', 'service-quotas get-service-quota',
+  'ecr describe-repositories', 'resourcegroupstaggingapi get-resources',
+  'autoscaling describe-auto-scaling-groups',
+  'lambda invoke',
+  'elbv2 describe-load-balancers', 'elbv2 describe-target-groups', 'elbv2 describe-listeners', 'elbv2 describe-tags',
+]);
+
+export function errorCode(output) {
+  if (/invalid choice/i.test(String(output))) return 'AWS_CLI_OPERATION_UNAVAILABLE';
+  if (/acquiring the state lock|state lock|ConditionalCheckFailed/i.test(String(output))) return 'StateLock';
+  if (/must be logged in|provide credentials|Unauthorized\b/i.test(String(output))) return 'KUBERNETES_AUTH_REJECTED';
+  const known = ['AccessDenied', 'UnauthorizedOperation', 'Forbidden', 'NoSuchBucket', 'NoSuchEntity',
+    'ResourceNotFound', 'NoSuchKey', 'DBInstanceNotFound', 'RepositoryNotFound', 'LoadBalancerNotFound', 'InvalidParameter', 'Unsupported',
+    'ExpiredToken', 'InvalidClientTokenId', 'StateLock', 'Backend', 'InsufficientInstanceCapacity',
+    'CrashLoopBackOff', 'ImagePullBackOff', 'ProgressDeadlineExceeded'];
+  return known.find(code => String(output).toLowerCase().includes(code.toLowerCase())) || 'COMMAND_FAILED';
+}
+
+export function aws(service, operation, parameters = [], execute = spawnSync) {
+  if (!allowed.has(`${service} ${operation}`)) throw new Error('READ_ONLY_ALLOWLIST_REJECTED');
+  if (service === 'lambda' && (parameters[parameters.indexOf('--payload') + 1] !== '{"probe":true}'
+    || parameters[parameters.indexOf('--function-name') + 1] !== 'arn:aws:lambda:us-east-1:446517826146:function:tc-oficina-p4-demo-a-endpoint-recovery')) {
+    throw new Error('READ_ONLY_ALLOWLIST_REJECTED');
+  }
+  const result = execute('aws', [service, operation, ...parameters, '--region', 'us-east-1', '--output', 'json',
+    '--no-cli-pager', '--cli-connect-timeout', '5', '--cli-read-timeout', '15'],
+  { encoding: 'utf8', timeout: 45000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, AWS_MAX_ATTEMPTS: '2' } });
+  if (result.status !== 0 || result.error) throw new Error(result.error?.code === 'ENOENT' ? 'AWS_CLI_UNAVAILABLE' : errorCode(result.stderr));
+  try { return JSON.parse(result.stdout || '{}'); } catch { throw new Error('INVALID_JSON'); }
+}
+
+export class Report {
+  constructor(operation, directory = process.env.REPORT_DIR || 'actions-report') {
+    this.directory = directory;
+    this.data = { schema_version: 1, operation, environment: 'demo-a',
+      run_id: process.env.GITHUB_RUN_ID || 'offline', attempt: process.env.GITHUB_RUN_ATTEMPT || '1',
+      revision: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') ? process.env.GITHUB_SHA : 'offline', checks: [], environment_ready: false };
+  }
+  async check(phase, resource, action, next = 'Review configuration and rerun the same workflow.') {
+    const started = Date.now();
+    let status = 'PASS';
+    let reason = 'VERIFIED';
+    try {
+      const result = await action();
+      if (result?.deferred) { status = 'DEFERRED'; reason = 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS'; }
+    } catch (error) {
+      status = 'FAIL';
+      reason = /^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message);
+    }
+    this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next });
+    this.write();
+    return status === 'PASS';
+  }
+  write() {
+    fs.mkdirSync(this.directory, { recursive: true });
+    this.data.result = this.data.checks.some(check => check.status === 'FAIL') ? 'FAIL' : 'PASS';
+    fs.writeFileSync(path.join(this.directory, 'report.json'), JSON.stringify(this.data, null, 2));
+    const lines = [`# Environment ${this.data.operation}: ${this.data.result}`,
+      `Run: ${this.data.run_id}, attempt: ${this.data.attempt}, revision: ${this.data.revision}`,
+      '', '| Phase | Resource | Status | ms | Reason | Next action |', '|---|---|---|---:|---|---|',
+      ...this.data.checks.map(check => `| ${check.phase} | ${check.resource} | ${check.status} | ${check.duration_ms} | ${check.reason} | ${check.next_action} |`)];
+    fs.writeFileSync(path.join(this.directory, 'summary.md'), lines.join('\n') + '\n');
+  }
+  finish() {
+    this.write();
+    if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+      fs.readFileSync(path.join(this.directory, 'summary.md')));
+    return this.data.result === 'PASS' ? 0 : 1;
+  }
+}
+
+function verify(condition, reason) { if (!condition) throw new Error(reason); }
+
+export function nodeChildArns(inventory, call) {
+  const resources = Object.values(inventory.resources).flat();
+  const vpc = resources.find(resource => resource.type === 'aws_vpc');
+  if (!vpc || !resources.some(resource => resource.type === 'aws_eks_cluster')) return [];
+  let group;
+  try { group = call('eks', 'describe-nodegroup', ['--cluster-name', prefix, '--nodegroup-name', `${prefix}-nodes`]).nodegroup; }
+  catch (error) { if (error.message === 'ResourceNotFound') return []; throw error; }
+  verify(group.clusterName === prefix && group.tags.EnvironmentId === 'demo-a', 'NODEGROUP_OWNERSHIP_REJECTED');
+  const names = group.resources.autoScalingGroups.map(item => item.name);
+  if (!names.length) return [];
+  const groups = call('autoscaling', 'describe-auto-scaling-groups', ['--auto-scaling-group-names', ...names]).AutoScalingGroups;
+  const identifiers = groups.flatMap(item => item.Instances.map(instance => instance.InstanceId));
+  if (!identifiers.length) return [];
+  const instances = call('ec2', 'describe-instances', ['--instance-ids', ...identifiers]).Reservations.flatMap(item => item.Instances);
+  const arns = [];
+  for (const instance of instances) {
+    verify(instance.VpcId === vpc.id && identifiers.includes(instance.InstanceId), 'NODE_VPC_MISMATCH');
+    arns.push(`arn:aws:ec2:us-east-1:446517826146:instance/${instance.InstanceId}`);
+    arns.push(...instance.BlockDeviceMappings.map(item => `arn:aws:ec2:us-east-1:446517826146:volume/${item.Ebs.VolumeId}`));
+    arns.push(...instance.NetworkInterfaces.map(item => `arn:aws:ec2:us-east-1:446517826146:network-interface/${item.NetworkInterfaceId}`));
+  }
+  return arns;
+}
+
+export function albChildArns(inventory, call) {
+  const resources = Object.values(inventory.resources).flat();
+  const vpc = resources.find(resource => resource.type === 'aws_vpc');
+  if (!vpc || !inventory.resources.edge?.length) return [];
+  let balancers;
+  try { balancers = call('elbv2', 'describe-load-balancers', ['--names', `${prefix}-edge`]).LoadBalancers; }
+  catch (error) { if (error.message === 'LoadBalancerNotFound') return []; throw error; }
+  const arns = [];
+  for (const balancer of balancers) {
+    verify(balancer.VpcId === vpc.id && balancer.LoadBalancerName === `${prefix}-edge`, 'ALB_VPC_MISMATCH');
+    const tags = call('elbv2', 'describe-tags', ['--resource-arns', balancer.LoadBalancerArn]).TagDescriptions[0].Tags;
+    verify(tags.some(tag => tag.Key === 'EnvironmentId' && tag.Value === 'demo-a'), 'ALB_OWNERSHIP_REJECTED');
+    arns.push(balancer.LoadBalancerArn);
+    const groups = call('elbv2', 'describe-target-groups', ['--load-balancer-arn', balancer.LoadBalancerArn]).TargetGroups;
+    verify(groups.every(group => group.VpcId === vpc.id), 'ALB_TARGET_VPC_MISMATCH');
+    arns.push(...groups.map(group => group.TargetGroupArn));
+    arns.push(...call('elbv2', 'describe-listeners', ['--load-balancer-arn', balancer.LoadBalancerArn]).Listeners.map(listener => listener.ListenerArn));
+  }
+  return arns;
+}
+
+export function context(config, environment = process.env) {
+  verify(config.environment === 'demo-a' && config.account === '446517826146' && config.region === 'us-east-1', 'SCOPE_REJECTED');
+  verify(environment.GITHUB_REPOSITORY === config.repository && environment.GITHUB_REF === 'refs/heads/homolog', 'REPOSITORY_OR_BRANCH_REJECTED');
+  verify(environment.GITHUB_EVENT_NAME === 'workflow_dispatch', 'MANUAL_DISPATCH_REQUIRED');
+}
+
+export function operationalGate(operation, confirmation, config, catalog, environment = process.env) {
+  context(config, environment);
+  verify(['up', 'destroy'].includes(operation), 'OPERATION_REJECTED');
+  verify(confirmation === `${operation.toUpperCase()} demo-a`, 'CONFIRMATION_REJECTED');
+  verify((operation === 'destroy' || catalog.enabled) && catalog.aws_account_id === config.account && Boolean(catalog.backend_bucket), 'CATALOG_DISABLED');
+  verify((operation === 'destroy' || config.execution_enabled === true) && environment.PHASE4_EXECUTION_APPROVED === 'true', 'EXECUTION_DISABLED');
+}
+
+function tcp(host) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host, port: 443 });
+    socket.setTimeout(5000);
+    socket.once('connect', () => { socket.destroy(); resolve(); });
+    socket.once('error', () => { socket.destroy(); reject(new Error('PRIVATE_ENDPOINT_UNREACHABLE')); });
+    socket.once('timeout', () => { socket.destroy(); reject(new Error('PRIVATE_ENDPOINT_TIMEOUT')); });
+  });
+}
+
+export async function preflight(config, catalog, report, call = aws, connect = tcp) {
+  const runtimeFile = path.join(root, 'phase4/environments/demo-a.runtime.json');
+  const runtime = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {};
+  const identityValid = await report.check('identity', 'STS', () => {
+    const identity = call('sts', 'get-caller-identity');
+    verify(identity.Account === config.account && /^arn:aws:sts::446517826146:assumed-role\/tc-oficina-p4-demo-a-provision\//.test(identity.Arn), 'OIDC_PROVISION_ROLE_REQUIRED');
+  }, 'Install the provision role using the separate bootstrap procedure; never use root keys.');
+  if (!identityValid) return;
+  await report.check('configuration', 'catalog', () => verify(catalog.enabled && catalog.aws_account_id === config.account && catalog.backend_bucket, 'CATALOG_DISABLED'));
+  await report.check('account-plan', 'Free Tier', () => {
+    const plan = call('freetier', 'get-account-plan-state');
+    verify(plan.accountPlanType === 'FREE' && plan.accountPlanStatus === 'ACTIVE', 'ACCOUNT_PLAN_INCOMPATIBLE');
+  }, 'Verify plan status in AWS Console; do not upgrade implicitly.');
+  await report.check('service-entitlements', 'FREE account-specific operator review', () => {
+    const review = runtime.preflight_authorization || {};
+    verify(runtime.approved && review.account === config.account && review.region === config.region
+      && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
+      && ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager'].every(service => review.free_services_reviewed?.includes(service))
+      && typeof review.reference === 'string' && review.reference.length > 0, 'SERVICE_ENTITLEMENTS_NOT_PROVEN');
+  },
+    'Read APIs cannot prove permission to create EKS/RDS/ELB on FREE. Obtain account-specific evidence and implement its validation.');
+  await report.check('backend', 'S3 persistent backend', () => {
+    const bucket = catalog.backend_bucket;
+    verify(typeof bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket), 'BACKEND_NOT_CONFIGURED');
+    const owner = ['--bucket', bucket, '--expected-bucket-owner', config.account];
+    const location = call('s3api', 'get-bucket-location', owner).LocationConstraint;
+    verify(location === null || location === 'us-east-1', 'BACKEND_REGION_MISMATCH');
+    verify(call('s3api', 'get-bucket-versioning', owner).Status === 'Enabled', 'BACKEND_VERSIONING_REQUIRED');
+    verify(call('s3api', 'get-bucket-encryption', owner).ServerSideEncryptionConfiguration.Rules.length > 0, 'BACKEND_ENCRYPTION_REQUIRED');
+    const block = call('s3api', 'get-public-access-block', owner).PublicAccessBlockConfiguration;
+    verify(['BlockPublicAcls', 'IgnorePublicAcls', 'BlockPublicPolicy', 'RestrictPublicBuckets'].every(key => block[key] === true), 'BACKEND_PUBLIC_ACCESS_BLOCK_REQUIRED');
+    call('s3api', 'list-objects-v2', [...owner, '--prefix', 'phase4/environments/demo-a/', '--max-keys', '10']);
+  }, 'Select a private, encrypted, versioned backend in us-east-1. No write probe is performed.');
+  await report.check('backend-permissions', 'operator review of backend state and lock writes', () => {
+    verify(runtime.approved && runtime.preflight_authorization?.backend_permissions_reviewed === true
+      && runtime.preflight_authorization?.valid_until > Date.now() / 1000, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
+  },
+    'Review exact state and .tflock permissions; read-only checks cannot prove writes.');
+  await report.check('oidc', 'GitHub provider', () => {
+    const provider = call('iam', 'get-open-id-connect-provider', ['--open-id-connect-provider-arn', `arn:aws:iam::${config.account}:oidc-provider/token.actions.githubusercontent.com`]);
+    verify(provider.ClientIDList.includes('sts.amazonaws.com') && provider.Url.replace('https://', '').replace(/\/$/, '') === 'token.actions.githubusercontent.com', 'OIDC_PROVIDER_INCOMPATIBLE');
+  });
+  for (const purpose of ['provision', 'deploy', 'destroy']) {
+    await report.check('roles', `${prefix}-${purpose}`, () => {
+      const role = call('iam', 'get-role', ['--role-name', `${prefix}-${purpose}`]).Role;
+      verify(role.Arn === `arn:aws:iam::${config.account}:role/${prefix}-${purpose}`, 'ROLE_ARN_MISMATCH');
+      verify(role.AssumeRolePolicyDocument.Statement.some(statement => statement.Effect === 'Allow'
+        && statement.Action === 'sts:AssumeRoleWithWebIdentity'
+        && statement.Principal?.Federated === `arn:aws:iam::${config.account}:oidc-provider/token.actions.githubusercontent.com`
+        && statement.Condition?.StringEquals?.['token.actions.githubusercontent.com:aud'] === 'sts.amazonaws.com'
+        && [`repo:${config.repository}:environment:phase4-demo-a-${purpose}`,
+          `repo:AuroNet0@128399450/tech-challenge-oficina-k8s-infra@1355187946:environment:phase4-demo-a-${purpose}`]
+          .includes(statement.Condition?.StringEquals?.['token.actions.githubusercontent.com:sub'])), 'ROLE_TRUST_INCOMPATIBLE');
+    }, 'Review actual GitHub subject configuration, trust and restricted permissions. Existence does not prove effective permissions.');
+  }
+  await report.check('versions', 'EKS', () => {
+    const versions = call('eks', 'describe-cluster-versions', ['--cluster-versions', config.eks_version]);
+    verify(versions.clusterVersions.some(version => version.clusterVersion === config.eks_version
+      && [version.status, version.versionStatus].some(status => String(status).toUpperCase() === 'STANDARD_SUPPORT')), 'EKS_STANDARD_VERSION_UNAVAILABLE');
+  });
+  await report.check('versions', 'RDS PostgreSQL', () => {
+    verify(call('rds', 'describe-db-engine-versions', ['--engine', 'postgres', '--engine-version', config.postgres_version])
+      .DBEngineVersions.some(version => version.Status === 'available'), 'RDS_VERSION_UNAVAILABLE');
+    verify(call('rds', 'describe-orderable-db-instance-options', ['--engine', 'postgres', '--engine-version', config.postgres_version,
+      '--db-instance-class', config.rds_class]).OrderableDBInstanceOptions.length > 0, 'RDS_CLASS_UNAVAILABLE');
+  });
+  await report.check('network', 'Availability Zones', () => {
+    verify(config.availability_zones.length === 2 && new Set(config.availability_zones).size === 2, 'TWO_AZS_REQUIRED');
+    const zones = call('ec2', 'describe-availability-zones').AvailabilityZones;
+    verify(config.availability_zones.every(name => zones.some(zone => zone.ZoneName === name && zone.State === 'available'
+      && ['opt-in-not-required', 'opted-in'].includes(zone.OptInStatus))), 'AZ_UNAVAILABLE');
+  });
+  await report.check('capacity', 'two m7i-flex.large nodes', () => {
+    verify(config.node_count === 2 && config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+    const type = call('ec2', 'describe-instance-types', ['--instance-types', config.instance_type]).InstanceTypes[0];
+    const offered = call('ec2', 'describe-instance-type-offerings', ['--location-type', 'availability-zone', '--filters', `Name=instance-type,Values=${config.instance_type}`]).InstanceTypeOfferings;
+    verify(config.availability_zones.length === 2 && offered.some(item => item.Location === config.availability_zones[0]), 'NODE_AZ_OFFERING_UNAVAILABLE');
+    const quota = call('service-quotas', 'get-service-quota', ['--service-code', 'ec2', '--quota-code', 'L-1216C47A']).Quota.Value;
+    const instances = call('ec2', 'describe-instances', ['--filters', 'Name=instance-state-name,Values=pending,running,stopping,stopped']).Reservations.flatMap(item => item.Instances);
+    const usage = instances.filter(instance => /^[acdhimrtz]/.test(instance.InstanceType) && instance.InstanceLifecycle !== 'spot')
+      .reduce((total, instance) => total + instance.CpuOptions.CoreCount * instance.CpuOptions.ThreadsPerCore, 0);
+    verify(Number.isFinite(usage) && quota - usage >= 2 * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
+  }, 'Offerings and quotas cannot guarantee live EC2 capacity. Review usage and regional restrictions.');
+  await report.check('inventory', 'previous resources and conflicts', () => {
+    let inventory = { resources: {} };
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-preflight-'));
+    try {
+      const destination = path.join(directory, 'inventory.json');
+      call('s3api', 'get-object', ['--bucket', catalog.backend_bucket, '--key', 'phase4/environments/demo-a/operations/inventory.json', '--expected-bucket-owner', config.account, destination]);
+      inventory = JSON.parse(fs.readFileSync(destination));
+      verify(inventory.account === config.account && inventory.region === config.region && inventory.environment === 'demo-a', 'INVENTORY_SCOPE_REJECTED');
+    } catch (error) {
+      if (error.message !== 'NoSuchKey') throw error;
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    const known = Object.values(inventory.resources).flat();
+    const external = [...Object.values(inventory.secrets || {}), ...(inventory.external_arns || []), ...nodeChildArns(inventory, call), ...albChildArns(inventory, call)];
+    const tagged = call('resourcegroupstaggingapi', 'get-resources', ['--tag-filters', 'Key=EnvironmentId,Values=demo-a']).ResourceTagMappingList;
+    const clusters = call('eks', 'list-clusters').clusters;
+    const databases = call('rds', 'describe-db-instances').DBInstances;
+    const vpcs = call('ec2', 'describe-vpcs', ['--filters', 'Name=cidr-block,Values=10.42.0.0/16']).Vpcs;
+    const repositories = call('ecr', 'describe-repositories').repositories.filter(item => item.repositoryName.startsWith(prefix));
+    verify(tagged.filter(item => item.Tags.some(tag => tag.Key === 'Lifecycle' && tag.Value === 'ephemeral')).every(item => known.some(resource => resource.arn === item.ResourceARN) || external.includes(item.ResourceARN))
+      && (!clusters.includes(prefix) || known.some(resource => resource.type === 'aws_eks_cluster' && resource.id === prefix))
+      && databases.filter(item => item.DBInstanceIdentifier === `${prefix}-postgres`).every(item => known.some(resource => resource.arn === item.DBInstanceArn))
+      && vpcs.every(item => known.some(resource => resource.id === item.VpcId))
+      && repositories.every(item => known.some(resource => resource.arn === item.repositoryArn)), 'EXISTING_RESOURCES_REQUIRE_STATE_RECONCILIATION');
+  }, 'Reconcile exact ARNs with the three persistent states and bootstrap inventory. Never delete or import by prefix alone.');
+  await report.check('connectivity', 'private Kubernetes endpoint', async () => {
+    if (process.env.PREFLIGHT_SCOPE === 'infra') {
+      try {
+        const cluster = call('eks', 'describe-cluster', ['--name', prefix]).cluster;
+        verify(cluster.resourcesVpcConfig.endpointPrivateAccess && !cluster.resourcesVpcConfig.endpointPublicAccess, 'INFRA_REQUIRES_CLOSED_ENDPOINT');
+      } catch (error) { if (error.message !== 'ResourceNotFound') throw error; }
+      return { deferred: true };
+    }
+    if (config.runner_mode === 'broker') {
+      verify(runtime.endpoint?.mode === 'broker' && runtime.endpoint?.independent_canary_verified === true, 'INDEPENDENT_RECOVERY_CANARY_REQUIRED');
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-recovery-probe-'));
+      try {
+        const destination = path.join(directory, 'probe.json');
+        const response = call('lambda', 'invoke', ['--function-name', `arn:aws:lambda:us-east-1:446517826146:function:${prefix}-endpoint-recovery`,
+          '--invocation-type', 'RequestResponse', '--cli-binary-format', 'raw-in-base64-out', '--payload', '{"probe":true}', destination]);
+        verify(!response.FunctionError && JSON.parse(fs.readFileSync(destination)).verified === true, 'LIVE_RECOVERY_PROBE_FAILED');
+      } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+      return;
+    }
+    verify(config.runner_mode === 'existing-private' && process.env.RUNNER_ENVIRONMENT === 'self-hosted', 'PRIVATE_EXECUTOR_NOT_CONFIGURED');
+    let host = config.private_probe_host;
+    try {
+      const cluster = call('eks', 'describe-cluster', ['--name', prefix]).cluster;
+      verify(!cluster.resourcesVpcConfig.endpointPublicAccess && cluster.resourcesVpcConfig.endpointPrivateAccess, 'EKS_ENDPOINT_NOT_PRIVATE');
+      host = new URL(cluster.endpoint).hostname;
+    } catch (error) { if (error.message !== 'ResourceNotFound') throw error; }
+    verify(typeof host === 'string' && /^[a-zA-Z0-9.-]+$/.test(host), 'PRIVATE_PATH_PROBE_REQUIRED');
+    await connect(host);
+  }, 'Provide an existing private runner with routing, DNS and outbound GitHub access. A TCP probe is not Kubernetes authorization.');
+  await report.check('artifacts', 'four reviewed service revisions', () => {
+    for (const service of ['auth', 'os', 'execution', 'billing']) {
+      const source = runtime.services?.[service];
+      verify(source && /^AuroNet0\/tech-challenge-oficina-[a-z-]+$/.test(source.repository)
+        && /^[0-9a-f]{40}$/.test(source.revision) && Array.isArray(source.required_checks) && source.required_checks.length > 0, 'APPROVED_SERVICE_REVISIONS_REQUIRED');
+      const response = spawnSync('gh', ['api', '--paginate', '--slurp', `repos/${source.repository}/commits/${source.revision}/check-runs?per_page=100`], { encoding: 'utf8', timeout: 30000 });
+      verify(response.status === 0, 'SOURCE_OR_CI_ACCESS_DENIED');
+      const checks = JSON.parse(response.stdout).flatMap(page => page.check_runs);
+      verify(source.required_checks.every(name => {
+        const check = checks.filter(item => item.name === name).sort((first, second) => second.id - first.id)[0];
+        return check && check.head_sha === source.revision && check.status === 'completed' && check.conclusion === 'success';
+      }), 'APPROVED_SERVICE_CI_REQUIRED');
+    }
+  }, 'Pin clean revisions and verify source access, CI, CA, signing, ACM, Mercado Pago and New Relic inputs.');
+}
+
+async function main() {
+  const operation = process.argv[2];
+  const report = new Report(operation);
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/actions-first.json')));
+    const catalog = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/catalog.json'))).environments['demo-a'];
+    const valid = await report.check('gate', 'repository and manual dispatch', () => context(config));
+    if (valid && operation === 'preflight') await preflight(config, catalog, report);
+    else if (valid) {
+      await report.check('gate', 'mutation disabled', () => operationalGate(operation, process.env.CONFIRMATION, config, catalog));
+    }
+  } catch { await report.check('configuration', 'input files', () => { throw new Error('CONFIGURATION_INVALID'); }); }
+  process.exitCode = report.finish();
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

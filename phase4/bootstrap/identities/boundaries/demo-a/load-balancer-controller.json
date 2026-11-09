@@ -1,0 +1,179 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RegionalControllerDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAccountAttributes",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeVpcPeeringConnections",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeTags",
+        "ec2:GetSecurityGroupsForVpc",
+        "ec2:DescribeRouteTables",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeListenerCertificates",
+        "elasticloadbalancing:DescribeSSLPolicies",
+        "elasticloadbalancing:DescribeRules",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetGroupAttributes",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "elasticloadbalancing:DescribeTags",
+        "elasticloadbalancing:DescribeTrustStores",
+        "elasticloadbalancing:DescribeListenerAttributes",
+        "elasticloadbalancing:DescribeCapacityReservation"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "AccountRegionalCertificateMetadata",
+      "Effect": "Allow",
+      "Action": "acm:DescribeCertificate",
+      "Resource": "arn:aws:acm:us-east-1:446517826146:certificate/*"
+    },
+    {
+      "Sid": "CreateInternalEnvironmentAlb",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:CreateLoadBalancer",
+      "Resource": "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/elbv2.k8s.aws/cluster": "tc-oficina-p4-demo-a",
+          "aws:RequestTag/EnvironmentId": "demo-a",
+          "elasticloadbalancing:Scheme": "internal"
+        }
+      }
+    },
+    {
+      "Sid": "CreateEnvironmentTargetGroups",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:CreateTargetGroup",
+      "Resource": "arn:aws:elasticloadbalancing:us-east-1:446517826146:targetgroup/*/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/elbv2.k8s.aws/cluster": "tc-oficina-p4-demo-a",
+          "aws:RequestTag/EnvironmentId": "demo-a"
+        }
+      }
+    },
+    {
+      "Sid": "TagOnCreate",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:AddTags",
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:targetgroup/*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/elbv2.k8s.aws/cluster": "tc-oficina-p4-demo-a",
+          "aws:RequestTag/EnvironmentId": "demo-a",
+          "elasticloadbalancing:CreateAction": [
+            "CreateLoadBalancer",
+            "CreateTargetGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManageOwnedAlbAndTargets",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:RegisterTargets",
+        "elasticloadbalancing:DeregisterTargets",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags",
+        "elasticloadbalancing:SetSubnets",
+        "elasticloadbalancing:SetSecurityGroups"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:targetgroup/*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/elbv2.k8s.aws/cluster": "tc-oficina-p4-demo-a",
+          "aws:ResourceTag/EnvironmentId": "demo-a"
+        }
+      }
+    },
+    {
+      "Sid": "CreateHttpsListener",
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:CreateListener",
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:listener/app/tc-oficina-p4-demo-a-edge/*/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "elasticloadbalancing:ListenerProtocol": "HTTPS"
+        }
+      }
+    },
+    {
+      "Sid": "SelectedAlbListenersAndRules",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:DeleteListener",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyListener",
+        "elasticloadbalancing:ModifyListenerAttributes",
+        "elasticloadbalancing:AddListenerCertificates",
+        "elasticloadbalancing:RemoveListenerCertificates",
+        "elasticloadbalancing:ModifyRule",
+        "elasticloadbalancing:SetRulePriorities",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:listener/app/tc-oficina-p4-demo-a-edge/*/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:listener-rule/app/tc-oficina-p4-demo-a-edge/*/*/*"
+      ]
+    },
+    {
+      "Sid": "KeepOwnershipTags",
+      "Effect": "Deny",
+      "Action": [
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:loadbalancer/app/tc-oficina-p4-demo-a-edge/*",
+        "arn:aws:elasticloadbalancing:us-east-1:446517826146:targetgroup/*/*"
+      ],
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [
+            "elbv2.k8s.aws/cluster",
+            "EnvironmentId"
+          ]
+        },
+        "Null": {
+          "elasticloadbalancing:CreateAction": "true"
+        }
+      }
+    }
+  ]
+}

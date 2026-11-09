@@ -1,0 +1,72 @@
+name: Environment Bootstrap Identities
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type INSTALL demo-a IDENTITIES. Empty plan hash means plan only.'
+        type: string
+        required: true
+      approved_plan_sha256:
+        description: 'Hash reviewed in a previous plan-only run at the same Git revision'
+        type: string
+        required: false
+permissions:
+  contents: read
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+jobs:
+  identities:
+    environment: phase4-demo-a-bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Explicit bootstrap authorization
+        env:
+          BOOTSTRAP_APPROVED: ${{ vars.PHASE4_BOOTSTRAP_APPROVED }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$GITHUB_REPOSITORY" = 'AuroNet0/tech-challenge-oficina-k8s-infra'
+          test "$GITHUB_REF" = 'refs/heads/homolog'
+          test "$CONFIRMATION" = 'INSTALL demo-a IDENTITIES'
+          test "$BOOTSTRAP_APPROVED" = 'true'
+          test -f phase4/bootstrap/identities/approved-inputs.json
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Package reviewed recovery code deterministically
+        run: python scripts/environment-actions/package_recovery.py
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-bootstrap
+          role-session-name: bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          allowed-account-ids: '446517826146'
+          unset-current-credentials: true
+      - name: Plan or install approved persistent bootstrap resources
+        env:
+          APPROVED_PLAN_SHA256: ${{ inputs.approved_plan_sha256 }}
+        run: node scripts/environment-actions/bootstrap.mjs
+      - name: Report setup failure
+        if: ${{ always() }}
+        run: node scripts/environment-actions/diagnostics.mjs fallback bootstrap
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bootstrap-demo-a-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            actions-report/report.json
+            actions-report/summary.md
+            actions-report/identity-plan.json
+          if-no-files-found: error
+          retention-days: 7

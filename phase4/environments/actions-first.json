@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "environment": "demo-a",
+  "account": "446517826146",
+  "region": "us-east-1",
+  "repository": "AuroNet0/tech-challenge-oficina-k8s-infra",
+  "runner_mode": "broker",
+  "execution_enabled": false,
+  "private_probe_host": null,
+  "availability_zones": [],
+  "eks_version": "1.35",
+  "postgres_version": "17.10",
+  "node_count": 2,
+  "instance_type": "m7i-flex.large",
+  "rds_class": "db.t4g.micro",
+  "service_revisions": {},
+  "blocking_dependencies": [
+    "RECOVERY_CANARY: broker is disabled until independent recovery is installed and proven on AWS",
+    "BOUNDARIES_INVENTORY: reviewed boundaries and exact inventory permissions must be installed by bootstrap",
+    "AUTH_ISSUER: authorized signing document and synthetic demo actors required",
+    "AWS_E2E: Billing harness requires real endpoint and Mercado Pago test adapters",
+    "AWS_ACCOUNT: service eligibility on FREE and current quotas require operator review"
+  ]
+}

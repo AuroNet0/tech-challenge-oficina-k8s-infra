@@ -1,0 +1,16 @@
+{
+  "approved": false,
+  "account": "446517826146",
+  "region": "us-east-1",
+  "environment": "demo-a",
+  "backend_bucket": "",
+  "destroy_offline_verified": false,
+  "endpoint": {"mode": "broker", "independent_canary_verified": false},
+  "preflight_authorization": {},
+  "terraform_inputs": {"infra": {}, "platform": {}, "edge": {}},
+  "services": {},
+  "network_probe_image": "",
+  "mercado_pago_test_secret_arn": "",
+  "new_relic_secret_arn": "",
+  "observability_privileged_approved": false
+}

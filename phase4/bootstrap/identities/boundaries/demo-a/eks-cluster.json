@@ -1,0 +1,48 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RegionalNodeDiscovery",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeDhcpOptions",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeInstanceTopology"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "SelectedClusterNodeTags",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:446517826146:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/EnvironmentId": "demo-a"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "kubernetes.io/cluster/tc-oficina-p4-demo-a"
+          ]
+        },
+        "Null": {
+          "aws:TagKeys": "false"
+        }
+      }
+    },
+    {
+      "Sid": "AccountRegionalKeyMetadata",
+      "Effect": "Allow",
+      "Action": "kms:DescribeKey",
+      "Resource": "arn:aws:kms:us-east-1:446517826146:key/*"
+    }
+  ]
+}
