@@ -20,5 +20,9 @@ assert.ok(runtime.includes('/opt/bin/auth-bootstrap'));
 const identities = read('phase4/bootstrap/identities/operations.tf');
 assert.ok(identities.includes('NeverOpenClusterDirectly'));
 const recovery = read('phase4/modules/endpoint-recovery/main.tf');
-assert.match(recovery, /enabled\s*= false, recovery_verified = false/);
-console.log('Artifact/Terraform compatibility: 16 offline assertions passed; environments and endpoint remain blocked.');
+assert.match(recovery, /enabled\s*= var\.opening_approved && var\.recovery_verification_approved/);
+const recoveryVariables = read('phase4/modules/endpoint-recovery/variables.tf');
+for (const flag of ['opening_approved', 'recovery_verification_approved']) {
+  assert.match(recoveryVariables, new RegExp(`variable "${flag}" \\{[^}]*default\\s*= false`));
+}
+console.log('Artifact/Terraform compatibility: 18 offline assertions passed; endpoint activation requires approval and a live recovery probe.');

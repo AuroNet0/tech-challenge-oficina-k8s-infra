@@ -3,6 +3,15 @@ mock_provider "aws" {
   mock_resource "aws_sqs_queue" {
     defaults = { arn = "arn:aws:sqs:us-east-1:123456789012:tc-oficina-p4-demo-a-endpoint-recovery-dlq" }
   }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::123456789012:role/tc-oficina-p4-demo-a-recovery-scheduler" }
+  }
+  mock_resource "aws_dynamodb_table" {
+    defaults = { arn = "arn:aws:dynamodb:us-east-1:123456789012:table/tc-oficina-p4-demo-a-endpoint-leases" }
+  }
+  mock_resource "aws_cloudwatch_log_group" {
+    defaults = { arn = "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/tc-oficina-p4-demo-a-endpoint-recovery" }
+  }
 }
 
 variables {
@@ -65,6 +74,33 @@ run "foreign_cluster" {
   command = plan
   variables { cluster_arn = "arn:aws:eks:us-east-1:123456789012:cluster/foreign" }
   expect_failures = [terraform_data.guard]
+}
+
+run "opening_without_verification_is_disabled" {
+  command = plan
+  variables { opening_approved = true }
+  assert {
+    condition     = !local.config.enabled && !strcontains(aws_iam_role_policy.broker.policy, "eks:UpdateClusterConfig")
+    error_message = "Aprovacao isolada de abertura nao instala capacidade de abrir."
+  }
+}
+
+run "explicit_broker_activation_still_requires_runtime_probe" {
+  command = plan
+  variables {
+    opening_approved               = true
+    recovery_verification_approved = true
+  }
+  assert {
+    condition = (local.config.enabled && alltrue([
+      for statement in jsondecode(aws_iam_role_policy.broker.policy).Statement :
+      statement.Resource == var.cluster_arn && statement.Condition.Bool["eks:endpointPrivateAccess"] == "true"
+      if statement.Action == "eks:UpdateClusterConfig"
+      ]) && !strcontains(aws_iam_role_policy.storage["recovery"].policy, "VERIFICATION") &&
+      strcontains(aws_iam_role_policy.storage["recovery"].policy, "CANARY") &&
+    !strcontains(aws_iam_role_policy.storage["broker"].policy, "CANARY"))
+    error_message = "Somente broker aprovado pode abrir o cluster exato, mantendo privado; runtime nao pode autoaprovar VERIFICATION."
+  }
 }
 
 run "missing_alarm_channel" {

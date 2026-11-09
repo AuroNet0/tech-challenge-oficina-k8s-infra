@@ -3,6 +3,16 @@ variable "recovery_installation_approved" {
   default = false
 }
 
+variable "recovery_opening_approved" {
+  type    = bool
+  default = false
+}
+
+variable "recovery_verification_approved" {
+  type    = bool
+  default = false
+}
+
 variable "recovery_package_path" {
   type    = string
   default = ""
@@ -28,17 +38,19 @@ variable "recovery_reconcile_interval_minutes" {
 }
 
 module "endpoint_recovery" {
-  count                      = var.recovery_installation_approved ? 1 : 0
-  source                     = "../../modules/endpoint-recovery"
-  environment_id             = var.environment_id
-  account                    = local.account
-  region                     = local.region
-  cluster_arn                = local.cluster
-  recovery_role              = aws_iam_role.recovery.name
-  package_path               = var.recovery_package_path
-  alarm_topic_arn            = var.recovery_alarm_topic_arn
-  reconcile_interval_minutes = var.recovery_reconcile_interval_minutes
-  depends_on                 = [terraform_data.guard, aws_iam_role_policy.recovery]
+  count                          = var.recovery_installation_approved ? 1 : 0
+  source                         = "../../modules/endpoint-recovery"
+  environment_id                 = var.environment_id
+  account                        = local.account
+  region                         = local.region
+  cluster_arn                    = local.cluster
+  recovery_role                  = aws_iam_role.recovery.name
+  package_path                   = var.recovery_package_path
+  alarm_topic_arn                = var.recovery_alarm_topic_arn
+  reconcile_interval_minutes     = var.recovery_reconcile_interval_minutes
+  opening_approved               = var.recovery_opening_approved
+  recovery_verification_approved = var.recovery_verification_approved
+  depends_on                     = [terraform_data.guard, aws_iam_role_policy.recovery]
 }
 
 output "endpoint_recovery_preparation" {

@@ -34,9 +34,9 @@ locals {
     length(var.inventory.ecr) > 0 ? [{ Sid = "EmptyAndDeleteInventoriedEcr", Effect = "Allow", Action = ["ecr:BatchDeleteImage", "ecr:DeleteLifecyclePolicy", "ecr:DeleteRepository"], Resource = tolist(var.inventory.ecr) }] : []
   )) : "[]")
   raw_policies = {
-    provision = concat(local.provision, local.lifecycle_updates, local.workload_evidence)
-    deploy    = concat(local.deploy, local.rotation)
-    destroy   = concat(local.destroy, local.deletion, local.workload_evidence)
+    provision = concat(local.provision, local.lifecycle_updates, local.workload_evidence, local.action_journal, local.endpoint_clients, local.action_bucket_evidence, local.action_preflight, local.teardown_api, local.action_provision_external)
+    deploy    = concat(local.deploy, local.rotation, local.action_journal, local.endpoint_clients, local.action_bucket_evidence, local.action_deploy, local.action_external_inputs)
+    destroy   = concat(local.destroy, local.deletion, local.workload_evidence, local.action_journal, local.endpoint_clients, local.action_bucket_evidence, local.action_destroy, local.discover_partial_secrets)
   }
   effective_policies = { for purpose, statements in local.raw_policies : purpose => [for statement in statements : jsondecode(
     alltrue([for action in flatten([statement.Action]) : startswith(lower(action), "s3:")]) ? jsonencode(merge(statement, {

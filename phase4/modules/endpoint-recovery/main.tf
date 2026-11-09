@@ -14,7 +14,8 @@ locals {
     recovery_role_name         = var.recovery_role, broker_role_name = aws_iam_role.broker.name
     scheduler_role_arn         = aws_iam_role.scheduler.arn, dlq_arn = aws_sqs_queue.failures.arn
     code_sha256                = filebase64sha256(var.package_path)
-    enabled                    = false, recovery_verified = false
+    enabled                    = var.opening_approved && var.recovery_verification_approved
+    recovery_verified          = var.recovery_verification_approved
     reconcile_interval_minutes = var.reconcile_interval_minutes
   }
 }
@@ -105,7 +106,7 @@ resource "aws_iam_role_policy" "storage" {
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Effect = "Allow", Action = "dynamodb:GetItem", Resource = aws_dynamodb_table.leases.arn },
     { Effect = "Allow", Action = "dynamodb:PutItem", Resource = aws_dynamodb_table.leases.arn,
-    Condition = { "ForAllValues:StringLike" = { "dynamodb:LeadingKeys" = ["CURRENT", "????????????????????????????????"] } } },
+    Condition = { "ForAllValues:StringLike" = { "dynamodb:LeadingKeys" = concat(["CURRENT", "????????????????????????????????"], each.key == "recovery" ? ["CANARY"] : []) } } },
     { Effect = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents"], Resource = "${aws_cloudwatch_log_group.runtime["endpoint-${each.key}"].arn}:*" },
     { Effect = "Allow", Action = "sqs:SendMessage", Resource = aws_sqs_queue.failures.arn }
   ] })
@@ -122,8 +123,10 @@ locals {
 }
 
 resource "aws_iam_role_policy" "broker" {
-  role   = aws_iam_role.broker.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = local.broker_statements })
+  role = aws_iam_role.broker.id
+  policy = jsonencode({ Version = "2012-10-17", Statement = concat(local.broker_statements, var.opening_approved && var.recovery_verification_approved ? [
+    { Effect = "Allow", Action = "eks:UpdateClusterConfig", Resource = var.cluster_arn, Condition = { Bool = { "eks:endpointPrivateAccess" = "true" } } }
+  ] : []) })
 }
 
 resource "aws_lambda_function" "runtime" {

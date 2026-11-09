@@ -19,3 +19,7 @@ __pycache__/
 *.key
 .env
 secrets-runtime/
+actions-report/
+sources/
+*.tfplan
+phase4/bootstrap/identities/endpoint-recovery.zip

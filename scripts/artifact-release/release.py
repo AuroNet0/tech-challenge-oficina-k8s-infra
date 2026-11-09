@@ -323,7 +323,7 @@ def image_evidence(inspected, service, source_revision):
     return {"image_id": inspected["Id"], "platform": "linux/amd64"}
 
 
-def build_app(service, repository_path, source_revision, output, git="git", maven="mvn", java="java", docker="docker"):
+def build_app(service, repository_path, source_revision, output, git="git", maven="mvn", java="java", docker="docker", network_enabled=False):
     require(service in REPOSITORIES, "SERVICE_REJECTED")
     output = Path(output).resolve()
     require(not output.exists(), "OUTPUT_EXISTS")
@@ -340,7 +340,7 @@ def build_app(service, repository_path, source_revision, output, git="git", mave
     require(java_version.returncode == 0 and re.search(rb'version "21[.\"]', java_version.stderr + java_version.stdout), "JAVA_21_REQUIRED")
     settings = output / "settings.xml"
     settings.write_text('<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"/>', encoding="utf-8")
-    command([maven, "-o", "-B", "-ntp", "-s", str(settings), "-gs", str(settings), "clean", "verify"], workspace, environment)
+    command([maven, *([] if network_enabled else ["-o"]), "-B", "-ntp", "-s", str(settings), "-gs", str(settings), "clean", "verify"], workspace, environment)
     quality = maven_evidence(workspace, pending_internal_image=service == "auth")
     candidates = [path for path in (workspace / "target").glob("*.jar") if not path.name.startswith("original-")]
     require(len(candidates) == 1, "MAVEN_ARTIFACT_AMBIGUOUS")
@@ -356,16 +356,18 @@ def build_app(service, repository_path, source_revision, output, git="git", mave
                "jar": file_evidence(output / "application.jar"), "image": None, "remote": None}
     write_json(output / "maven-receipt.json", receipt)
     for image in bases:
+        if network_enabled:
+            command([docker, "pull", "--platform=linux/amd64", image], environment=environment)
         inspected_base = json.loads(command([docker, "image", "inspect", image], environment=environment))[0]
         receipt.setdefault("docker_bases", []).append({"reference": image, "image_id": inspected_base["Id"]})
     tag = f"oficina-release-{service}:{source_revision}"
-    command([docker, "build", "--network=none", "--pull=false", "--platform=linux/amd64",
+    command([docker, "build", "--network=default" if network_enabled else "--network=none", "--pull=false", "--platform=linux/amd64",
              "--label", f"org.opencontainers.image.revision={source_revision}",
              "--label", f"org.opencontainers.image.source=https://github.com/{REPOSITORIES[service]}", "-t", tag, "."], workspace, environment)
     inspected = json.loads(command([docker, "image", "inspect", tag], environment=environment))[0]
     receipt["image"] = image_evidence(inspected, service, source_revision)
     if quality["pending_container_test"]:
-        command([maven, "-o", "-B", "-ntp", "-s", str(settings), "-gs", str(settings),
+        command([maven, *([] if network_enabled else ["-o"]), "-B", "-ntp", "-s", str(settings), "-gs", str(settings),
                  f"-Dauth.internal.image={tag}", "verify"], workspace, environment)
         receipt["maven"] = maven_evidence(workspace)
     command([docker, "save", "-o", str(output / "image.tar"), tag], environment=environment)
@@ -422,7 +424,7 @@ def verify_layer(path, ca_policy, fixture=False):
     return {**file_evidence(path), "fixture": fixture, "ca_sha256": digest(ca)}
 
 
-def build_layer(source_revision, ca_file, output, ca_policy, fixture=False, git="git", maven="mvn", java="java"):
+def build_layer(source_revision, ca_file, output, ca_policy, fixture=False, git="git", maven="mvn", java="java", network_enabled=False):
     archive = provenance(ROOT, INFRA_REPOSITORY, source_revision, git, fixture=fixture)
     output = Path(output)
     require(not output.exists(), "OUTPUT_EXISTS")
@@ -447,7 +449,7 @@ def build_layer(source_revision, ca_file, output, ca_policy, fixture=False, git=
     require(java_version.returncode == 0 and re.search(rb'version "21[.\"]', java_version.stderr + java_version.stdout), "JAVA_21_REQUIRED")
     settings = output / "settings.xml"
     settings.write_text('<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"/>', encoding="utf-8")
-    command([maven, "-o", "-B", "-ntp", "-s", str(settings), "-gs", str(settings), "clean", "package"],
+    command([maven, *([] if network_enabled else ["-o"]), "-B", "-ntp", "-s", str(settings), "-gs", str(settings), "clean", "package"],
             workspace / "phase4/stacks/edge/lambda-bootstrap", environment)
     helper_jar = workspace / "phase4/stacks/edge/lambda-bootstrap/target/auth-bootstrap.jar"
     verify_jar(helper_jar, helper=True)

@@ -151,13 +151,13 @@ output "policy_documents" {
 output "endpoint_broker_candidate" {
   description = "Nao anexada a nenhuma role. Abertura bloqueada ate broker/lease/recuperacao independente operacionais."
   value = {
-    implemented  = false
+    implemented  = true
     open_allowed = false
     cluster_arn  = local.cluster
     policy_json = jsonencode({ Version = "2012-10-17", Statement = [
       { Effect = "Allow", Action = ["eks:DescribeCluster", "eks:DescribeUpdate", "eks:ListUpdates"], Resource = local.cluster },
       { Effect = "Allow", Action = "eks:UpdateClusterConfig", Resource = local.cluster, Condition = { Bool = { "eks:endpointPrivateAccess" = "true" } } }
     ] })
-    reason = "IAM nao oferece condition key publicAccessCidrs; broker deve validar IP /32 observado, lease duravel e payload fixo. Nenhuma role GitHub recebe abertura direta."
+    reason = "Broker valida IP /32 observado, lease duravel e payload fixo. Ativacao exige bootstrap aprovado e prova recente no runtime; este output nao atesta readiness. Nenhuma role GitHub recebe abertura direta."
   }
 }

@@ -106,7 +106,11 @@ run "exact_destroy_inventory" {
     }
   }
   assert {
-    condition     = strcontains(output.policy_documents.destroy, "DeleteSecret") && strcontains(output.policy_documents.destroy, "vpc-00000000000000001") && !strcontains(output.policy_documents.destroy, "secret:/oficina/phase4/demo-a/auth-postgres-??????")
+    condition = strcontains(output.policy_documents.destroy, "DeleteSecret") && strcontains(output.policy_documents.destroy, "vpc-00000000000000001") && alltrue([
+      for statement in jsondecode(output.policy_documents.destroy).Statement : alltrue([
+        for arn in flatten([statement.Resource]) : contains(values(var.inventory.secrets), arn)
+      ]) if contains(flatten([statement.Action]), "secretsmanager:DeleteSecret")
+    ])
     error_message = "Delete exige ARNs completos; wildcard de criacao nao pode virar autorizacao destrutiva."
   }
 }

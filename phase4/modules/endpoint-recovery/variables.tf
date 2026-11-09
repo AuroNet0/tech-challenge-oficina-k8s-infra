@@ -6,6 +6,16 @@ variable "recovery_role" { type = string }
 variable "package_path" { type = string }
 variable "alarm_topic_arn" { type = string }
 
+variable "opening_approved" {
+  type    = bool
+  default = false
+}
+
+variable "recovery_verification_approved" {
+  type    = bool
+  default = false
+}
+
 variable "reconcile_interval_minutes" {
   description = "Intervalo inteiro entre 1 e 5 minutos; 5 para uso academico, 1 quando operacionalmente justificado."
   type        = number

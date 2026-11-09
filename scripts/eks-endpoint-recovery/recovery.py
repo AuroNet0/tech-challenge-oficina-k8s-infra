@@ -93,7 +93,11 @@ class EndpointLease:
         require(re.fullmatch(r"[0-9a-f]{32}", record["lease_id"]) is not None, "LEASE_REJECTED")
         require(re.fullmatch(r"[0-9]{1,20}", record["github_run_id"]) is not None, "RUN_REJECTED")
         require(re.fullmatch(r"[0-9a-f]{40}", record["revision"]) is not None, "REVISION_REJECTED")
-        expected = hashlib.sha256((record["cluster_arn"] + ":" + record["github_run_id"]).encode()).hexdigest()[:32]
+        identity = record["cluster_arn"] + ":" + record["github_run_id"]
+        if "github_run_attempt" in record:
+            require(re.fullmatch(r"[1-9][0-9]{0,4}", record["github_run_attempt"]) is not None, "ATTEMPT_REJECTED")
+            identity += ":" + record["github_run_attempt"]
+        expected = hashlib.sha256(identity.encode()).hexdigest()[:32]
         require(record["lease_id"] == expected, "LEASE_REJECTED")
         require(record["schedule_id"] == "lease-" + expected, "SCHEDULE_REJECTED")
         try:
@@ -145,14 +149,21 @@ class EndpointLease:
     def prepare(self, request):
         self.identity()
         require(self.config["enabled"] and self.config["recovery_verified"], "OPENING_DISABLED")
-        require(set(request) == {"github_run_id", "revision", "observed_ip", "duration_seconds"}, "INPUT_REJECTED")
+        fields = {"github_run_id", "revision", "observed_ip", "duration_seconds"}
+        require(set(request) in (fields, fields | {"github_run_attempt"}), "INPUT_REJECTED")
         require(type(request["duration_seconds"]) is int, "DURATION_REJECTED")
         now = int(self.clock())
-        lease_id = hashlib.sha256((self.config["cluster_arn"] + ":" + str(request["github_run_id"])).encode()).hexdigest()[:32]
+        identity = self.config["cluster_arn"] + ":" + str(request["github_run_id"])
+        if "github_run_attempt" in request:
+            require(isinstance(request["github_run_attempt"], str) and re.fullmatch(r"[1-9][0-9]{0,4}", request["github_run_attempt"]) is not None, "ATTEMPT_REJECTED")
+            identity += ":" + request["github_run_attempt"]
+        lease_id = hashlib.sha256(identity.encode()).hexdigest()[:32]
         record = {key: self.config[key] for key in ["environment_id", "account", "region", "cluster_name", "cluster_arn"]}
         record.update(lease_id=lease_id, github_run_id=str(request["github_run_id"]), revision=request["revision"],
                       cidr=request["observed_ip"] + "/32", created_at=now, expires_at=now + request["duration_seconds"],
                       state="PREPARING", schedule_id="lease-" + lease_id, version=1, dispatch_until=0)
+        if "github_run_attempt" in request:
+            record["github_run_attempt"] = request["github_run_attempt"]
         self.validate(record)
         existing = self.store.get(lease_id)
         if existing:
@@ -259,6 +270,21 @@ class EndpointLease:
 
     def recover(self, event):
         self.identity()
+        if set(event) == {"canary"}:
+            request = event["canary"]
+            require(set(request) == {"github_run_id", "revision"}
+                    and re.fullmatch(r"[0-9]{1,20}", request["github_run_id"]) is not None
+                    and re.fullmatch(r"[0-9a-f]{40}", request["revision"]) is not None, "CANARY_INPUT_REJECTED")
+            cluster = self.cluster()
+            require(cluster["status"] == "ACTIVE" and not cluster["resourcesVpcConfig"]["endpointPublicAccess"]
+                    and cluster["resourcesVpcConfig"]["endpointPrivateAccess"], "CANARY_REQUIRES_PRIVATE_CLUSTER")
+            update = self.eks.update_cluster_config(name=self.config["cluster_name"],
+                resourcesVpcConfig={"endpointPublicAccess": False, "endpointPrivateAccess": True})["update"]
+            record = {key: self.config[key] for key in ["environment_id", "account", "region", "cluster_arn", "recovery_role_arn", "code_sha256"]}
+            record.update(state="PENDING", close_update_id=update["id"], cluster_created_at=cluster["createdAt"].isoformat(),
+                          requested_at=int(self.clock()), **request)
+            self.store.client.put_item(TableName=self.store.table, Item={"id": {"S": "CANARY"}, "record": {"S": json.dumps(record)}})
+            return {"state": "CANARY_REQUESTED"}
         if event == {"probe": True}:
             evidence = self.store.get("VERIFICATION")
             require(evidence is not None, "RECOVERY_NOT_VERIFIED")
@@ -275,6 +301,16 @@ class EndpointLease:
             require(evidence["cluster_created_at"] == cluster["createdAt"].isoformat(), "RECOVERY_CLUSTER_RECREATED")
             return {"verified": True}
         if event == {"reconcile": True}:
+            canary = self.store.get("CANARY")
+            if canary and canary["state"] == "PENDING":
+                require(all(canary[key] == self.config[key] for key in ["environment_id", "account", "region", "cluster_arn", "recovery_role_arn", "code_sha256"]), "CANARY_SCOPE_REJECTED")
+                update = self.eks.describe_update(name=self.config["cluster_name"], updateId=canary["close_update_id"])["update"]
+                cluster = self.cluster()
+                if update["status"] == "Successful" and cluster["status"] == "ACTIVE":
+                    require(not cluster["resourcesVpcConfig"]["endpointPublicAccess"] and cluster["resourcesVpcConfig"]["endpointPrivateAccess"]
+                            and canary["cluster_created_at"] == cluster["createdAt"].isoformat(), "CANARY_CLUSTER_CHANGED")
+                    canary.update(state="VERIFIED", verified_at=int(self.clock()))
+                    self.store.client.put_item(TableName=self.store.table, Item={"id": {"S": "CANARY"}, "record": {"S": json.dumps(canary)}})
             record = self.store.get("CURRENT")
             if not record or record["state"] in TERMINAL:
                 return {"state": "IDLE"}

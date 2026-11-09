@@ -30,6 +30,11 @@ class Dynamo:
             item = self.items.get(arguments["Key"]["id"]["S"])
             return {"Item": copy.deepcopy(item)} if item else {}
 
+    def put_item(self, TableName, Item):
+        with self.lock:
+            self.items[Item['id']['S']] = copy.deepcopy(Item)
+        return {}
+
     def transact_write_items(self, TransactItems):
         with self.lock:
             if self.fail:
@@ -117,6 +122,40 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(request["resourcesVpcConfig"], {
             "endpointPublicAccess": True, "endpointPrivateAccess": True, "publicAccessCidrs": ["8.8.8.8/32"]})
         self.assertEqual(self.store.get(lease_id)["state"], "OPEN_REQUESTED")
+
+    def test_rerun_attempt_has_new_lease_after_prior_attempt_closed(self):
+        first = self.prepare(github_run_attempt="1")
+        self.store.change(self.store.get(first), state="CLOSED")
+        second = self.prepare(github_run_attempt="2")
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.store.get(second)["github_run_attempt"], "2")
+
+    def test_invalid_attempt_never_persists(self):
+        for attempt in ["0", "-1", "foreign", "100000", 1]:
+            with self.assertRaises(Blocked):
+                self.prepare(github_run_attempt=attempt)
+        self.assertFalse(self.dynamo.items)
+
+    def test_private_canary_is_completed_by_independent_reconciliation(self):
+        self.assertEqual(self.service.recover({'canary': {'github_run_id': '12345', 'revision': 'a' * 40}}), {'state': 'CANARY_REQUESTED'})
+        self.assertEqual(self.store.get('CANARY')['state'], 'PENDING')
+        arguments = self.eks.update_cluster_config.call_args.kwargs
+        self.assertEqual(arguments['resourcesVpcConfig'], {'endpointPublicAccess': False, 'endpointPrivateAccess': True})
+        self.service.recover({'reconcile': True})
+        self.assertEqual(self.store.get('CANARY')['state'], 'VERIFIED')
+        self.assertIsNone(self.store.get('VERIFICATION'))
+
+    def test_canary_cannot_open_or_verify_changed_cluster(self):
+        self.network['endpointPublicAccess'] = True
+        with self.assertRaises(Blocked):
+            self.service.recover({'canary': {'github_run_id': '12345', 'revision': 'a' * 40}})
+        self.eks.update_cluster_config.assert_not_called()
+        self.network['endpointPublicAccess'] = False
+        self.service.recover({'canary': {'github_run_id': '12345', 'revision': 'a' * 40}})
+        self.cluster_value['createdAt'] = datetime(2026, 11, 8, tzinfo=timezone.utc)
+        with self.assertRaises(Blocked):
+            self.service.recover({'reconcile': True})
+        self.assertEqual(self.store.get('CANARY')['state'], 'PENDING')
 
     def test_invalid_inputs_never_persist(self):
         for changes in [{"observed_ip": value} for value in ["0.0.0.0/0", "8.8.8.8/24", "::1", "127.0.0.1", "10.0.0.1", "224.1.1.1", "100.64.0.1"]] + [

@@ -1,0 +1,3 @@
+boto3>=1.40,<2
+kubernetes>=34,<36
+cryptography==50.0.1
