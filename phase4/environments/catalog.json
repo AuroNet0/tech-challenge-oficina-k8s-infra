@@ -4,12 +4,12 @@
   "environments": {
     "demo-a": {
       "enabled": false,
-      "aws_account_id": null,
+      "aws_account_id": "446517826146",
       "aws_region": "us-east-1",
       "project_name": "oficina",
       "resource_prefix": "tc",
       "owner": "tech-challenge-oficina",
-      "backend_bucket": null,
+      "backend_bucket": "tech-challenge-oficina-terraform-state-b1cfa326",
       "state_keys": {
         "infra": "phase4/environments/demo-a/infra.tfstate",
         "platform": "phase4/environments/demo-a/platform.tfstate",

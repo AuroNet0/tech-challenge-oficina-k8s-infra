@@ -47,6 +47,14 @@ export function aws(service, operation, parameters = [], execute = spawnSync) {
   try { return JSON.parse(result.stdout || '{}'); } catch { throw new Error('INVALID_JSON'); }
 }
 
+class AwsInspectionError extends Error {
+  constructor(error, service, operation, permissions) {
+    super(/^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message));
+    this.call = { service, operation };
+    this.permissions = permissions;
+  }
+}
+
 export class Report {
   constructor(operation, directory = process.env.REPORT_DIR || 'actions-report') {
     this.directory = directory;
@@ -72,6 +80,10 @@ export class Report {
           console.error(`::${diagnostic.severity}::${message}`);
         }
       }
+      if (error instanceof AwsInspectionError) {
+        failure = { aws_call: error.call, required_permissions: error.permissions };
+        console.error(`AWS inspection failed: ${error.call.service} ${error.call.operation} (${reason})`);
+      }
     }
     this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next, ...failure });
     this.write();
@@ -92,6 +104,18 @@ export class Report {
         lines.push(`<pre>${message}</pre>`, '');
       }
     }
+    for (const check of this.data.checks.filter(check => check.aws_call)) {
+      lines.push('', `AWS call: ${check.aws_call.service} ${check.aws_call.operation} (${check.reason})`);
+      for (const permission of check.required_permissions) lines.push(`Required: ${permission.action} on ${permission.resource}`);
+    }
+    if (this.data.availability) {
+      const evidence = this.data.availability;
+      lines.push('', '## Availability evidence', '',
+        `Region: ${evidence.region}; instance type: ${evidence.instance_type}`, '',
+        '| Available AZ | Zone ID | Instance type offered |', '|---|---|---|',
+        ...evidence.available_zones.map(zone => `| ${zone.name} | ${zone.id} | ${evidence.offered_zones.includes(zone.name) ? 'Yes' : 'No'} |`),
+        '', `Candidates for operator review: ${evidence.candidate_zones.join(', ') || 'None'}. No zones selected automatically.`);
+    }
     fs.writeFileSync(path.join(this.directory, 'summary.md'), lines.join('\n') + '\n');
   }
   finish() {
@@ -103,6 +127,21 @@ export class Report {
 }
 
 function verify(condition, reason) { if (!condition) throw new Error(reason); }
+
+export function availabilityEvidence(config, call) {
+  verify(config.region === 'us-east-1' && config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+  const zones = call('ec2', 'describe-availability-zones', ['--filters', 'Name=zone-type,Values=availability-zone']).AvailabilityZones;
+  const offerings = call('ec2', 'describe-instance-type-offerings', ['--location-type', 'availability-zone', '--filters', `Name=instance-type,Values=${config.instance_type}`]).InstanceTypeOfferings;
+  const zoneName = name => typeof name === 'string' && /^us-east-1[a-z]$/.test(name);
+  const available = zones.filter(zone => zone.State === 'available' && zone.ZoneType === 'availability-zone'
+    && ['opt-in-not-required', 'opted-in'].includes(zone.OptInStatus) && zoneName(zone.ZoneName))
+    .map(zone => ({ name: zone.ZoneName, id: /^use1-az[0-9]+$/.test(zone.ZoneId || '') ? zone.ZoneId : 'unreported' }))
+    .sort((first, second) => first.name.localeCompare(second.name));
+  const offered = [...new Set(offerings.filter(item => item.InstanceType === config.instance_type
+    && item.LocationType === 'availability-zone' && zoneName(item.Location)).map(item => item.Location))].sort();
+  return { region: 'us-east-1', instance_type: 'm7i-flex.large', available_zones: available, offered_zones: offered,
+    candidate_zones: available.filter(zone => offered.includes(zone.name)).map(zone => zone.name) };
+}
 
 export function nodeChildArns(inventory, call) {
   const resources = Object.values(inventory.resources).flat();
@@ -181,7 +220,12 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     verify(identity.Account === config.account && /^arn:aws:sts::446517826146:assumed-role\/tc-oficina-p4-demo-a-provision\//.test(identity.Arn), 'OIDC_PROVISION_ROLE_REQUIRED');
   }, 'Install the provision role using the separate bootstrap procedure; never use root keys.');
   if (!identityValid) return;
-  await report.check('configuration', 'catalog', () => verify(catalog.enabled && catalog.aws_account_id === config.account && catalog.backend_bucket, 'CATALOG_DISABLED'));
+  await report.check('configuration', 'catalog metadata', () => verify(catalog.aws_account_id === config.account
+    && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket || ''), 'CATALOG_INCOMPLETE'));
+  await report.check('execution-gate', 'catalog and execution authorization', () => {
+    verify(catalog.enabled, 'CATALOG_DISABLED');
+    verify(config.execution_enabled === true, 'EXECUTION_DISABLED');
+  });
   await report.check('account-plan', 'Free Tier', () => {
     const plan = call('freetier', 'get-account-plan-state');
     verify(plan.accountPlanType === 'FREE' && plan.accountPlanStatus === 'ACTIVE', 'ACCOUNT_PLAN_INCOMPATIBLE');
@@ -239,17 +283,23 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     verify(call('rds', 'describe-orderable-db-instance-options', ['--engine', 'postgres', '--engine-version', config.postgres_version,
       '--db-instance-class', config.rds_class]).OrderableDBInstanceOptions.length > 0, 'RDS_CLASS_UNAVAILABLE');
   });
+  let availability;
+  await report.check('availability-discovery', 'account AZs and instance type offerings', () => {
+    verify(config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+    availability = availabilityEvidence(config, call);
+    report.data.availability = availability;
+  }, 'Review available AZ names/IDs and instance type offerings in report.json before selecting two distinct AZs.');
   await report.check('network', 'Availability Zones', () => {
     verify(config.availability_zones.length === 2 && new Set(config.availability_zones).size === 2, 'TWO_AZS_REQUIRED');
-    const zones = call('ec2', 'describe-availability-zones').AvailabilityZones;
-    verify(config.availability_zones.every(name => zones.some(zone => zone.ZoneName === name && zone.State === 'available'
-      && ['opt-in-not-required', 'opted-in'].includes(zone.OptInStatus))), 'AZ_UNAVAILABLE');
+    verify(availability, 'AZ_DISCOVERY_REQUIRED');
+    verify(config.availability_zones.every(name => availability.available_zones.some(zone => zone.name === name)), 'AZ_UNAVAILABLE');
   });
   await report.check('capacity', 'two m7i-flex.large nodes', () => {
     verify(config.node_count === 2 && config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+    verify(config.availability_zones.length === 2 && new Set(config.availability_zones).size === 2, 'TWO_AZS_REQUIRED');
+    verify(availability, 'AZ_DISCOVERY_REQUIRED');
+    verify(config.availability_zones.every(name => availability.candidate_zones.includes(name)), 'NODE_AZ_OFFERING_UNAVAILABLE');
     const type = call('ec2', 'describe-instance-types', ['--instance-types', config.instance_type]).InstanceTypes[0];
-    const offered = call('ec2', 'describe-instance-type-offerings', ['--location-type', 'availability-zone', '--filters', `Name=instance-type,Values=${config.instance_type}`]).InstanceTypeOfferings;
-    verify(config.availability_zones.length === 2 && offered.some(item => item.Location === config.availability_zones[0]), 'NODE_AZ_OFFERING_UNAVAILABLE');
     const quota = call('service-quotas', 'get-service-quota', ['--service-code', 'ec2', '--quota-code', 'L-1216C47A']).Quota.Value;
     const instances = call('ec2', 'describe-instances', ['--filters', 'Name=instance-state-name,Values=pending,running,stopping,stopped']).Reservations.flatMap(item => item.Instances);
     const usage = instances.filter(instance => /^[acdhimrtz]/.test(instance.InstanceType) && instance.InstanceLifecycle !== 'spot')
@@ -257,29 +307,38 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     verify(Number.isFinite(usage) && quota - usage >= 2 * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
   }, 'Offerings and quotas cannot guarantee live EC2 capacity. Review usage and regional restrictions.');
   await report.check('inventory', 'previous resources and conflicts', () => {
+    verify(typeof catalog.backend_bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket), 'BACKEND_NOT_CONFIGURED');
+    const inspect = (service, operation, parameters = []) => {
+      try { return call(service, operation, parameters); }
+      catch (error) {
+        const permissions = service === 's3api' && operation === 'get-object'
+          ? [{ action: 's3:GetObject', resource: `arn:aws:s3:::${catalog.backend_bucket}/phase4/environments/demo-a/operations/inventory.json` }] : [];
+        throw new AwsInspectionError(error, service, operation, permissions);
+      }
+    };
     let inventory = { resources: {} };
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-preflight-'));
     try {
       const destination = path.join(directory, 'inventory.json');
-      call('s3api', 'get-object', ['--bucket', catalog.backend_bucket, '--key', 'phase4/environments/demo-a/operations/inventory.json', '--expected-bucket-owner', config.account, destination]);
+      inspect('s3api', 'get-object', ['--bucket', catalog.backend_bucket, '--key', 'phase4/environments/demo-a/operations/inventory.json', '--expected-bucket-owner', config.account, destination]);
       inventory = JSON.parse(fs.readFileSync(destination));
       verify(inventory.account === config.account && inventory.region === config.region && inventory.environment === 'demo-a', 'INVENTORY_SCOPE_REJECTED');
     } catch (error) {
       if (error.message !== 'NoSuchKey') throw error;
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
     const known = Object.values(inventory.resources).flat();
-    const external = [...Object.values(inventory.secrets || {}), ...(inventory.external_arns || []), ...nodeChildArns(inventory, call), ...albChildArns(inventory, call)];
-    const tagged = call('resourcegroupstaggingapi', 'get-resources', ['--tag-filters', 'Key=EnvironmentId,Values=demo-a']).ResourceTagMappingList;
-    const clusters = call('eks', 'list-clusters').clusters;
-    const databases = call('rds', 'describe-db-instances').DBInstances;
-    const vpcs = call('ec2', 'describe-vpcs', ['--filters', 'Name=cidr-block,Values=10.42.0.0/16']).Vpcs;
-    const repositories = call('ecr', 'describe-repositories').repositories.filter(item => item.repositoryName.startsWith(prefix));
+    const external = [...Object.values(inventory.secrets || {}), ...(inventory.external_arns || []), ...nodeChildArns(inventory, inspect), ...albChildArns(inventory, inspect)];
+    const tagged = inspect('resourcegroupstaggingapi', 'get-resources', ['--tag-filters', 'Key=EnvironmentId,Values=demo-a']).ResourceTagMappingList;
+    const clusters = inspect('eks', 'list-clusters').clusters;
+    const databases = inspect('rds', 'describe-db-instances').DBInstances;
+    const vpcs = inspect('ec2', 'describe-vpcs', ['--filters', 'Name=cidr-block,Values=10.42.0.0/16']).Vpcs;
+    const repositories = inspect('ecr', 'describe-repositories').repositories.filter(item => item.repositoryName.startsWith(prefix));
     verify(tagged.filter(item => item.Tags.some(tag => tag.Key === 'Lifecycle' && tag.Value === 'ephemeral')).every(item => known.some(resource => resource.arn === item.ResourceARN) || external.includes(item.ResourceARN))
       && (!clusters.includes(prefix) || known.some(resource => resource.type === 'aws_eks_cluster' && resource.id === prefix))
       && databases.filter(item => item.DBInstanceIdentifier === `${prefix}-postgres`).every(item => known.some(resource => resource.arn === item.DBInstanceArn))
       && vpcs.every(item => known.some(resource => resource.id === item.VpcId))
       && repositories.every(item => known.some(resource => resource.arn === item.repositoryArn)), 'EXISTING_RESOURCES_REQUIRE_STATE_RECONCILIATION');
-  }, 'Reconcile exact ARNs with the three persistent states and bootstrap inventory. Never delete or import by prefix alone.');
+  }, 'Review the failed AWS call and required permissions against the configured backend; reconcile exact ARNs before any IAM or state change.');
   await report.check('connectivity', 'private Kubernetes endpoint', async () => {
     if (process.env.PREFLIGHT_SCOPE === 'infra') {
       try {
