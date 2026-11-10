@@ -118,26 +118,63 @@ class Report:
                 summary.write((self.directory / 'summary.md').read_text(encoding='utf-8'))
 
 
-def guard(operation, configuration, catalog, environment=None):
+def current_review(configuration, scope):
+    review = configuration.get('preflight_authorization', {})
+    return (review.get('account') == ACCOUNT and review.get('region') == REGION and review.get('scope') == scope
+            and isinstance(review.get('valid_until'), (int, float))
+            and time.time() < review['valid_until'] < time.time() + 86400
+            and isinstance(review.get('reference'), str) and bool(review['reference'].strip()))
+
+
+def guard(operation, configuration, catalog, environment=None, execution_mode='apply', phase='infra',
+          execution_configuration=None, cleanup=False):
     environment = os.environ if environment is None else environment
     require(environment.get('GITHUB_REPOSITORY') == 'AuroNet0/tech-challenge-oficina-k8s-infra'
             and environment.get('GITHUB_REF') == 'refs/heads/homolog'
             and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch', 'DISPATCH_SCOPE_REJECTED')
-    require(environment.get('PHASE4_EXECUTION_APPROVED') == 'true', 'EXECUTION_NOT_AUTHORIZED')
+    require(execution_mode in ('plan', 'apply'), 'EXECUTION_MODE_REJECTED')
+    planning = operation == 'up' and execution_mode == 'plan' and not cleanup
+    require(environment.get('PHASE4_PLAN_APPROVED' if planning else 'PHASE4_EXECUTION_APPROVED') == 'true',
+            'PLAN_NOT_AUTHORIZED' if planning else 'EXECUTION_NOT_AUTHORIZED')
     require(environment.get('CONFIRMATION') == operation.upper() + ' demo-a', 'CONFIRMATION_REJECTED')
     require(configuration.get('account') == ACCOUNT and configuration.get('region') == REGION
             and configuration.get('environment') == 'demo-a', 'CONFIGURATION_SCOPE_REJECTED')
     require(re.fullmatch(r'[0-9a-f]{40}', environment.get('GITHUB_SHA', '')), 'REVISION_REQUIRED')
-    require(configuration.get('approved') is True and re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', configuration.get('backend_bucket', '')), 'BACKEND_NOT_APPROVED')
+    require(re.fullmatch(r'[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', configuration.get('backend_bucket', '')), 'BACKEND_NOT_APPROVED')
     require(catalog.get('backend_bucket') == configuration['backend_bucket'] and catalog.get('aws_account_id') == ACCOUNT,
             'CATALOG_BACKEND_MISMATCH')
+    if planning:
+        require(phase == 'infra', 'PLAN_SCOPE_REJECTED')
+        require(catalog.get('aws_region') == REGION, 'CATALOG_REGION_MISMATCH')
+        require(current_review(configuration, 'infra')
+                and configuration['preflight_authorization'].get('backend_permissions_reviewed') is True,
+                'PLANNING_BACKEND_NOT_REVIEWED')
+        return
+    require(configuration.get('approved') is True, 'BACKEND_NOT_APPROVED')
     if operation == 'up':
         require(catalog.get('enabled') is True, 'ENVIRONMENT_DISABLED')
         require(configuration.get('destroy_offline_verified') is True, 'DESTROY_VALIDATION_REQUIRED')
+        if not cleanup:
+            if execution_configuration is not None:
+                require(execution_configuration.get('execution_enabled') is True, 'EXECUTION_DISABLED')
+            scope = 'infra' if phase == 'infra' else 'full'
+            review = configuration.get('preflight_authorization', {})
+            services = {'eks', 'ec2', 'rds', 'ecr', 'secretsmanager', 'logs', 'iam'}
+            if scope == 'full':
+                services.update({'lambda', 'elbv2'})
+            require(current_review(configuration, scope) and review.get('free_plan_creation_reviewed') is True
+                    and services.issubset(set(review.get('free_services_reviewed', []))), 'CREATION_ELIGIBILITY_NOT_REVIEWED')
+            require(review.get('backend_permissions_reviewed') is True, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN')
+            endpoint = configuration.get('endpoint', {})
+            require(endpoint.get('mode') in ('broker', 'existing-private')
+                    and endpoint.get('private_creation_reviewed') is True and endpoint.get('teardown_reviewed') is True
+                    and isinstance(endpoint.get('recovery_reference'), str) and bool(endpoint['recovery_reference'].strip()),
+                    'EKS_RECOVERY_STRATEGY_NOT_REVIEWED')
 
 
 class Driver:
-    def __init__(self, configuration, report, clients=None, execute=None, sleep=time.sleep):
+    def __init__(self, configuration, report, clients=None, execute=None, sleep=time.sleep, catalog=None,
+                 execution_configuration=None):
         self.config, self.report, self.sleep = configuration, report, sleep
         self.clients = clients or {}
         self.execute = execute or subprocess.run
@@ -146,6 +183,8 @@ class Driver:
         self.journal = dict(schema_version=1, account=ACCOUNT, region=REGION, environment='demo-a', stacks={},
                             resources={}, secrets={}, images={}, objects=[], layers=[], receipts={})
         self.lease = None
+        self.catalog = catalog if catalog is not None else json.loads((ROOT / 'phase4/environments/catalog.json').read_text())['environments']['demo-a']
+        self.execution_configuration = execution_configuration if execution_configuration is not None else json.loads((ROOT / 'phase4/environments/actions-first.json').read_text())
         self.temporary = tempfile.TemporaryDirectory(prefix='phase4-actions-')
 
     def client(self, service):
@@ -365,9 +404,19 @@ class Driver:
             receipt = receipts[name]
             require(receipt.get('revision') == os.environ['GITHUB_SHA'] and 0 <= time.time() - receipt.get('observed_at', 0) < 7200, 'EVIDENCE_STALE', name)
 
-    def plan_apply(self, stack, approved_hash='', profile=None):
+    def plan_apply(self, stack, approved_hash='', profile=None, execution_mode='plan'):
+        require(execution_mode in ('plan', 'apply'), 'EXECUTION_MODE_REJECTED')
+        if execution_mode == 'plan':
+            require(not approved_hash, 'PLAN_HASH_NOT_ALLOWED')
+        else:
+            require(re.fullmatch(r'[0-9a-f]{64}', approved_hash), 'APPROVED_PLAN_HASH_REQUIRED')
+        guard('up', self.config, self.catalog, execution_mode=execution_mode, phase=profile or stack,
+              execution_configuration=self.execution_configuration)
         self.init(stack)
         values = self.variables(stack, profile)
+        require(execution_mode != 'apply' or not values.get('planning_only'), 'PLANNING_INPUT_CANNOT_APPLY')
+        if stack == 'infra':
+            values['planning_only'] = execution_mode == 'plan' and self.catalog.get('enabled') is not True
         inputs_file = Path(self.temporary.name) / (stack + '.json')
         inputs_file.write_bytes(canonical(values))
         plan_file = Path(self.temporary.name) / (stack + '.tfplan')
@@ -380,11 +429,15 @@ class Driver:
         require(not any('delete' in change['change']['actions'] for change in changes), 'UP_REPLACEMENT_REQUIRES_SEPARATE_REVIEW')
         fingerprint = digest(canonical(dict(revision=os.environ['GITHUB_SHA'], stack=stack, variables=values,
             changes=changes, outputs=document.get('output_changes', {}))))
-        summary = dict(stack=stack, sha256=fingerprint, changes=[dict(address=change['address'], actions=change['change']['actions']) for change in changes])
+        summary = dict(stack=stack, sha256=fingerprint, execution_mode=execution_mode,
+            requires_enabled_replan=bool(values.get('planning_only', False)),
+            changes=[dict(address=change['address'], actions=change['change']['actions']) for change in changes])
         (self.report.directory / 'plan.json').write_bytes(canonical(summary))
-        if not approved_hash:
+        if execution_mode == 'plan':
             return 'PLAN_ONLY'
         require(re.fullmatch(r'[0-9a-f]{64}', approved_hash) and approved_hash == fingerprint, 'APPROVED_PLAN_HASH_MISMATCH')
+        guard('up', self.config, self.catalog, execution_mode='apply', phase=profile or stack,
+              execution_configuration=self.execution_configuration)
         self.journal['stacks'][stack] = values
         self.save()
         try:
@@ -734,6 +787,7 @@ def main():
     parser.add_argument('operation', choices=['up', 'destroy', 'teardown', 'close'])
     parser.add_argument('--phase', default='infra')
     parser.add_argument('--approved-plan-sha256', default='')
+    parser.add_argument('--execution-mode', choices=['plan', 'apply'], default='plan')
     options = parser.parse_args()
     report = Report(options.operation)
     driver = None
@@ -749,10 +803,16 @@ def main():
             operation = 'destroy' if options.operation == 'teardown' else options.operation
             if operation == 'close':
                 operation = 'up' if os.environ.get('CONFIRMATION') == 'UP demo-a' else 'destroy'
-                guard(operation, configuration, {**catalog, 'enabled': True}, os.environ)
+                guard(operation, configuration, {**catalog, 'enabled': True}, os.environ, cleanup=True)
             else:
-                guard(operation, configuration, catalog)
-        driver = Driver(configuration, report)
+                if operation == 'up':
+                    require(options.execution_mode != 'plan' or not options.approved_plan_sha256, 'PLAN_HASH_NOT_ALLOWED')
+                    require(options.execution_mode != 'apply' or options.phase.split('-')[0] not in STACKS
+                            or re.fullmatch(r'[0-9a-f]{64}', options.approved_plan_sha256), 'APPROVED_PLAN_HASH_REQUIRED')
+                execution_configuration = json.loads((ROOT / 'phase4/environments/actions-first.json').read_text())
+                guard(operation, configuration, catalog, execution_mode=options.execution_mode if operation == 'up' else 'apply',
+                      phase=options.phase, execution_configuration=execution_configuration)
+        driver = Driver(configuration, report, catalog=catalog)
         with report.phase('identity-backend-inventory', PREFIX):
             driver.load()
         if options.operation == 'destroy':
@@ -763,7 +823,7 @@ def main():
             driver.close_endpoint()
         elif options.phase.split('-')[0] in STACKS:
             with report.phase('terraform-plan-apply', options.phase) as entry:
-                entry['outcome'] = driver.plan_apply(options.phase.split('-')[0], options.approved_plan_sha256, options.phase)
+                entry['outcome'] = driver.plan_apply(options.phase.split('-')[0], options.approved_plan_sha256, options.phase, options.execution_mode)
         else:
             from delivery import up_phase
             with report.phase('delivery', options.phase):

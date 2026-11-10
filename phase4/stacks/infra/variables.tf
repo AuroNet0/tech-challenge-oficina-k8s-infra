@@ -1,3 +1,10 @@
+variable "planning_only" {
+  description = "Permite somente gerar plano de demo-a desabilitado; executor deve impedir apply deste plano."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "environment_id" {
   description = "Identificador cadastrado no catalogo."
   type        = string

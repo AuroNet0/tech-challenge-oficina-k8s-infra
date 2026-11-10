@@ -9,7 +9,7 @@ import { reviewPlan, validateInputs } from './bootstrap.mjs';
 
 const config = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/actions-first.json')));
 const environment = { GITHUB_REPOSITORY: config.repository, GITHUB_REF: 'refs/heads/homolog', GITHUB_EVENT_NAME: 'workflow_dispatch' };
-const catalog = { enabled: true, aws_account_id: config.account, backend_bucket: 'approved-backend' };
+const catalog = { enabled: true, aws_account_id: config.account, aws_region: config.region, backend_bucket: 'approved-backend' };
 
 async function withReport(operation, action) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-actions-'));
@@ -190,6 +190,37 @@ test('Up and Destroy share a lock and never cancel the running operation', () =>
 test('legacy has no auth, Terraform, AWS or destructive commands', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci-cd.yml'), 'utf8');
   assert.doesNotMatch(workflow, /terraform\s+(apply|destroy|plan)|id-token:|configure-aws|kubectl|helm/);
+});
+
+test('planning gate authorizes only infra planning without enabling apply', () => {
+  const disabledCatalog = { ...catalog, enabled: false };
+  const disabledConfiguration = { ...config, execution_enabled: false };
+  const runtime = { approved: false, account: config.account, region: config.region, environment: 'demo-a',
+    backend_bucket: catalog.backend_bucket, preflight_authorization: { account: config.account, region: config.region,
+      scope: 'infra', valid_until: Date.now() / 1000 + 3600, reference: 'offline-backend-review', backend_permissions_reviewed: true } };
+  const planning = { ...environment, EXECUTION_MODE: 'plan', PHASE: 'infra', PHASE4_PLAN_APPROVED: 'true' };
+  operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog, planning, runtime);
+  for (const override of [{ PHASE4_PLAN_APPROVED: 'false' }, { PHASE: 'platform' }, { PLAN_HASH: 'a'.repeat(64) }]) {
+    assert.throws(() => operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog,
+      { ...planning, ...override }, runtime));
+  }
+  assert.throws(() => operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog,
+    { ...planning, EXECUTION_MODE: 'apply', PLAN_HASH: '' }, runtime), /APPROVED_PLAN_HASH_REQUIRED/);
+  assert.equal(disabledCatalog.enabled, false);
+  assert.equal(runtime.approved, false);
+});
+
+test('workflow contracts preserve reusable defaults and propagate explicit planning intent', () => {
+  const preflight = fs.readFileSync(path.join(root, '.github/workflows/environment-preflight.yml'), 'utf8');
+  assert.match(preflight, /workflow_dispatch:[\s\S]*?scope:[\s\S]*?default: infra[\s\S]*?- infra[\s\S]*?- full/);
+  assert.match(preflight, /workflow_call:[\s\S]*?scope:[\s\S]*?default: full/);
+  assert.match(preflight, /intent:[\s\S]*?default: apply/);
+  assert.ok(preflight.includes("PREFLIGHT_INTENT: ${{ inputs.intent || 'inspect' }}"));
+  const up = fs.readFileSync(path.join(root, '.github/workflows/environment-up.yml'), 'utf8');
+  assert.match(up, /execution_mode:[\s\S]*?default: plan/);
+  assert.ok(up.includes('intent: ${{ inputs.execution_mode }}'));
+  assert.ok(up.includes("--execution-mode '${{ inputs.execution_mode }}'"));
+  assert.ok(up.includes("steps.aws.outcome == 'success' && inputs.execution_mode == 'apply'"));
 });
 
 test('bootstrap requires approved boundaries and excludes secret-bearing input variables', () => {

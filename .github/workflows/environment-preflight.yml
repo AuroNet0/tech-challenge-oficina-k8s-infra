@@ -1,11 +1,22 @@
 name: Environment Preflight
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Scope of the read-only inspection
+        type: choice
+        default: infra
+        options:
+          - infra
+          - full
   workflow_call:
     inputs:
       scope:
         type: string
         default: full
+      intent:
+        type: string
+        default: apply
     secrets:
       SOURCE_READ_TOKEN:
         required: false
@@ -46,6 +57,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
           PREFLIGHT_SCOPE: ${{ inputs.scope || 'full' }}
+          PREFLIGHT_INTENT: ${{ inputs.intent || 'inspect' }}
+          PHASE4_PLAN_APPROVED: ${{ vars.PHASE4_PLAN_APPROVED }}
+          PHASE4_EXECUTION_APPROVED: ${{ vars.PHASE4_EXECUTION_APPROVED }}
         run: node scripts/environment-actions/control.mjs preflight
       - name: Report setup failure
         if: ${{ always() }}

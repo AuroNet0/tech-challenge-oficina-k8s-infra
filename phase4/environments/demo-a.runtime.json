@@ -5,7 +5,7 @@
   "environment": "demo-a",
   "backend_bucket": "tech-challenge-oficina-terraform-state-b1cfa326",
   "destroy_offline_verified": false,
-  "endpoint": {"mode": "broker", "independent_canary_verified": false, "private_creation_reviewed": false, "recovery_reference": ""},
+  "endpoint": {"mode": "broker", "independent_canary_verified": false, "private_creation_reviewed": false, "teardown_reviewed": false, "recovery_reference": ""},
   "preflight_authorization": {},
   "terraform_inputs": {
     "infra": {

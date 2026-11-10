@@ -198,10 +198,38 @@ export function context(config, environment = process.env) {
   verify(environment.GITHUB_EVENT_NAME === 'workflow_dispatch', 'MANUAL_DISPATCH_REQUIRED');
 }
 
-export function operationalGate(operation, confirmation, config, catalog, environment = process.env) {
+export function currentReview(review, account, region, scope) {
+  return review?.account === account && review.region === region && review.scope === scope
+    && Number.isFinite(review.valid_until)
+    && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
+    && typeof review.reference === 'string' && review.reference.trim().length > 0;
+}
+
+export function planningGate(runtime, catalog, scope, environment = process.env) {
+  verify(scope === 'infra', 'PLAN_SCOPE_REJECTED');
+  verify(environment.PHASE4_PLAN_APPROVED === 'true', 'PLAN_NOT_AUTHORIZED');
+  verify(runtime.account === '446517826146' && runtime.region === 'us-east-1' && runtime.environment === 'demo-a'
+    && typeof runtime.backend_bucket === 'string' && /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(runtime.backend_bucket)
+    && catalog.aws_region === runtime.region
+    && runtime.backend_bucket === catalog.backend_bucket && catalog.aws_account_id === runtime.account
+    && currentReview(runtime.preflight_authorization, runtime.account, runtime.region, scope)
+    && runtime.preflight_authorization.backend_permissions_reviewed === true, 'PLANNING_BACKEND_NOT_REVIEWED');
+}
+
+export function operationalGate(operation, confirmation, config, catalog, environment = process.env, runtime = {}) {
   context(config, environment);
   verify(['up', 'destroy'].includes(operation), 'OPERATION_REJECTED');
   verify(confirmation === `${operation.toUpperCase()} demo-a`, 'CONFIRMATION_REJECTED');
+  if (operation === 'up') {
+    const mode = environment.EXECUTION_MODE || 'apply';
+    verify(['plan', 'apply'].includes(mode), 'EXECUTION_MODE_REJECTED');
+    if (mode === 'plan') {
+      verify(environment.PHASE === 'infra' && !environment.PLAN_HASH, 'PLAN_SCOPE_OR_HASH_REJECTED');
+      planningGate(runtime, catalog, 'infra', environment);
+      return;
+    }
+    verify(/^[a-f0-9]{64}$/.test(environment.PLAN_HASH || '') || !['infra', 'platform', 'edge'].includes((environment.PHASE || '').split('-')[0]), 'APPROVED_PLAN_HASH_REQUIRED');
+  }
   verify((operation === 'destroy' || catalog.enabled) && catalog.aws_account_id === config.account && Boolean(catalog.backend_bucket), 'CATALOG_DISABLED');
   verify((operation === 'destroy' || config.execution_enabled === true) && environment.PHASE4_EXECUTION_APPROVED === 'true', 'EXECUTION_DISABLED');
 }
@@ -238,13 +266,19 @@ export async function preflight(config, catalog, report, call = aws, connect = t
   const runtimeFile = path.join(root, 'phase4/environments/demo-a.runtime.json');
   const runtime = runtimeOverride ?? (fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {});
   const scope = process.env.PREFLIGHT_SCOPE || 'full';
+  const intent = process.env.PREFLIGHT_INTENT || 'apply';
   if (!await report.check('preflight-scope', 'requested scope', () => verify(['infra', 'full'].includes(scope), 'PREFLIGHT_SCOPE_REJECTED'))) return;
+  if (!await report.check('preflight-intent', 'requested intent', () => verify(['inspect', 'plan', 'apply'].includes(intent)
+    && (intent !== 'plan' || scope === 'infra'), 'PREFLIGHT_INTENT_REJECTED'))) return;
   report.data.scope = scope;
+  report.data.intent = intent;
+  report.data.free_plan_documentation = {
+    source: 'https://docs.aws.amazon.com/accounts/latest/reference/supported-services-sign-up-new.html',
+    reviewed_on: '2026-11-10', services_listed: ['eks', 'ec2', 'rds', 'ecr', 's3', 'iam'],
+    account_configuration_eligibility_confirmed: false,
+  };
   const review = runtime.preflight_authorization || {};
-  const reviewCurrent = () => runtime.approved === true && review.account === config.account && review.region === config.region
-    && review.scope === scope
-    && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
-    && typeof review.reference === 'string' && review.reference.trim().length > 0;
+  const reviewCurrent = () => runtime.approved === true && currentReview(review, config.account, config.region, scope);
   const identityValid = await report.check('identity', 'STS', () => {
     const identity = call('sts', 'get-caller-identity');
     verify(identity.Account === config.account && /^arn:aws:sts::446517826146:assumed-role\/tc-oficina-p4-demo-a-provision\//.test(identity.Arn), 'OIDC_PROVISION_ROLE_REQUIRED');
@@ -254,8 +288,11 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     && catalog.aws_region === config.region
     && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket || ''), 'CATALOG_INCOMPLETE'));
   await report.check('execution-gate', 'catalog and execution authorization', () => {
+    if (intent === 'inspect') return { deferred: true, reason: 'INSPECTION_DOES_NOT_AUTHORIZE_PLAN_OR_APPLY' };
+    if (intent === 'plan') { planningGate(runtime, catalog, scope); return; }
     verify(catalog.enabled, 'CATALOG_DISABLED');
     verify(config.execution_enabled === true, 'EXECUTION_DISABLED');
+    verify(process.env.PHASE4_EXECUTION_APPROVED === 'true', 'EXECUTION_DISABLED');
   });
   if (scope === 'infra') await report.check('infra-inputs', 'Terraform and preflight contracts', () => verifyInfraInputs(config, runtime));
   await report.check('account-plan', 'Free Tier', () => {
@@ -263,6 +300,7 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     verify(plan.accountPlanType === 'FREE' && plan.accountPlanStatus === 'ACTIVE', 'ACCOUNT_PLAN_INCOMPATIBLE');
   }, 'Verify plan status in AWS Console; do not upgrade implicitly.');
   await report.check('service-entitlements', 'FREE account-specific operator review', () => {
+    if (intent !== 'apply') return { deferred: true, reason: 'ACCOUNT_CONFIGURATION_ELIGIBILITY_REQUIRED_FOR_APPLY' };
     const services = scope === 'infra' ? ['eks', 'rds', 'ec2', 'ecr', 'secretsmanager', 'logs', 'iam']
       : ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager', 'logs', 'iam'];
     verify(reviewCurrent() && review.free_plan_creation_reviewed === true
@@ -282,6 +320,8 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     call('s3api', 'list-objects-v2', [...owner, '--prefix', 'phase4/environments/demo-a/', '--max-keys', '10']);
   }, 'Select a private, encrypted, versioned backend in us-east-1. No write probe is performed.');
   await report.check('backend-permissions', 'operator review of backend state and lock writes', () => {
+    if (intent === 'inspect') return { deferred: true, reason: 'BACKEND_WRITE_REVIEW_REQUIRED_FOR_PLAN' };
+    if (intent === 'plan') { planningGate(runtime, catalog, scope); return; }
     verify(reviewCurrent() && review.backend_permissions_reviewed === true
       && runtime.backend_bucket === catalog.backend_bucket, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
   },
@@ -372,10 +412,11 @@ export async function preflight(config, catalog, report, call = aws, connect = t
   }, 'Review the failed AWS call and required permissions against the configured backend; reconcile exact ARNs before any IAM or state change.');
   await report.check('connectivity', 'private Kubernetes endpoint', async () => {
     if (scope === 'infra') {
-      verify(['broker', 'existing-private'].includes(config.runner_mode) && runtime.endpoint?.mode === config.runner_mode
-        && runtime.endpoint.private_creation_reviewed === true && runtime.destroy_offline_verified === true
-        && typeof runtime.endpoint.recovery_reference === 'string' && runtime.endpoint.recovery_reference.trim().length > 0,
-      'EKS_RECOVERY_STRATEGY_NOT_REVIEWED');
+      if (intent === 'apply') verify(['broker', 'existing-private'].includes(config.runner_mode) && runtime.endpoint?.mode === config.runner_mode
+          && runtime.endpoint.private_creation_reviewed === true && runtime.endpoint.teardown_reviewed === true
+          && runtime.destroy_offline_verified === true
+          && typeof runtime.endpoint.recovery_reference === 'string' && runtime.endpoint.recovery_reference.trim().length > 0,
+        'EKS_RECOVERY_STRATEGY_NOT_REVIEWED');
       try {
         const cluster = call('eks', 'describe-cluster', ['--name', prefix]).cluster;
         verify(cluster.resourcesVpcConfig.endpointPrivateAccess && !cluster.resourcesVpcConfig.endpointPublicAccess, 'INFRA_REQUIRES_CLOSED_ENDPOINT');
@@ -433,7 +474,8 @@ async function main() {
     const valid = await report.check('gate', 'repository and manual dispatch', () => context(config));
     if (valid && operation === 'preflight') await preflight(config, catalog, report);
     else if (valid) {
-      await report.check('gate', 'mutation disabled', () => operationalGate(operation, process.env.CONFIRMATION, config, catalog));
+      const runtime = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/demo-a.runtime.json')));
+      await report.check('gate', 'requested operation', () => operationalGate(operation, process.env.CONFIRMATION, config, catalog, process.env, runtime));
     }
   } catch { await report.check('configuration', 'input files', () => { throw new Error('CONFIGURATION_INVALID'); }); }
   process.exitCode = report.finish();

@@ -7,7 +7,7 @@ on:
         required: true
         type: string
       phase:
-        description: Resumable phase; Terraform phases produce plan.json unless an approved hash is supplied
+        description: Resumable phase; plan mode supports infra only and never applies
         type: choice
         required: true
         default: infra
@@ -34,9 +34,16 @@ on:
           - health
           - e2e
       approved_plan_sha256:
-        description: SHA256 from a reviewed plan at the same revision and phase; empty means plan only
+        description: Required for Terraform apply mode; reviewed SHA256 at the same revision and phase
         type: string
         required: false
+      execution_mode:
+        description: Plan never applies; apply requires a reviewed hash and creation approvals
+        type: choice
+        default: plan
+        options:
+          - plan
+          - apply
       retry_failed_jobs:
         description: Recreate only failed owned Jobs with the same expected image, after collecting diagnostics
         type: boolean
@@ -63,6 +70,10 @@ jobs:
       - env:
           CONFIRMATION: ${{ inputs.confirmation }}
           PHASE4_EXECUTION_APPROVED: ${{ vars.PHASE4_EXECUTION_APPROVED }}
+          PHASE4_PLAN_APPROVED: ${{ vars.PHASE4_PLAN_APPROVED }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          PHASE: ${{ inputs.phase }}
+          PLAN_HASH: ${{ inputs.approved_plan_sha256 }}
         run: node scripts/environment-actions/control.mjs up
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
@@ -75,6 +86,7 @@ jobs:
     uses: ./.github/workflows/environment-preflight.yml
     with:
       scope: ${{ inputs.phase == 'infra' && 'infra' || 'full' }}
+      intent: ${{ inputs.execution_mode }}
     secrets:
       SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
     permissions:
@@ -92,6 +104,7 @@ jobs:
       EXECUTOR_ROLE: ${{ contains(fromJSON('["release","secrets","data","migrate","apps","health","jwks","alb-check","e2e"]'), inputs.phase) && 'deploy' || 'provision' }}
       CONFIRMATION: ${{ inputs.confirmation }}
       PHASE4_EXECUTION_APPROVED: ${{ vars.PHASE4_EXECUTION_APPROVED }}
+      PHASE4_PLAN_APPROVED: ${{ vars.PHASE4_PLAN_APPROVED }}
       RETRY_FAILED_JOBS: ${{ inputs.retry_failed_jobs }}
       AWS_EC2_METADATA_DISABLED: 'true'
     steps:
@@ -163,9 +176,9 @@ jobs:
         env:
           PHASE: ${{ inputs.phase }}
           PLAN_HASH: ${{ inputs.approved_plan_sha256 }}
-        run: python scripts/environment-actions/runtime.py up --phase "$PHASE" --approved-plan-sha256 "$PLAN_HASH"
+        run: python scripts/environment-actions/runtime.py up --phase "$PHASE" --approved-plan-sha256 "$PLAN_HASH" --execution-mode '${{ inputs.execution_mode }}'
       - name: Independently verify endpoint closure
-        if: ${{ always() && steps.aws.outcome == 'success' }}
+        if: ${{ always() && steps.aws.outcome == 'success' && inputs.execution_mode == 'apply' }}
         env:
           REPORT_DIR: actions-report/endpoint-close
         run: python scripts/environment-actions/runtime.py close

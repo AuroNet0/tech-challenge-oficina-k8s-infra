@@ -9,7 +9,7 @@ run "preparation_is_blocked" {
   command = plan
 
   assert {
-    condition     = !output.contract.ready && output.contract.backend.bucket == null
+    condition     = !output.contract.ready && !output.contract.planning_ready && output.contract.backend.bucket == "tech-challenge-oficina-terraform-state-b1cfa326"
     error_message = "O catalogo de preparacao nao pode liberar operacoes remotas."
   }
 

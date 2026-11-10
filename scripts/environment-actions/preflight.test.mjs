@@ -16,14 +16,21 @@ const zones = ['a', 'b'].map((suffix, index) => ({ ZoneName: `us-east-1${suffix}
 const offerings = zones.map(zone => ({ InstanceType: 'm7i-flex.large', LocationType: 'availability-zone', Location: zone.ZoneName }));
 
 async function simulate({ selected = [], backend = catalog.environments['demo-a'].backend_bucket,
-  offered = offerings, scope = 'full', configuration = unapprovedRuntime, authorized = false,
+  offered = offerings, scope = 'full', intent = 'apply', configuration = unapprovedRuntime, authorized = false,
+  planAuthorized = true,
   respond = () => { throw new Error('AccessDenied password=private-fixture'); } } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-offline-'));
   const previousScope = process.env.PREFLIGHT_SCOPE;
   const previousRevision = process.env.GITHUB_SHA;
+  const previousIntent = process.env.PREFLIGHT_INTENT;
+  const previousExecution = process.env.PHASE4_EXECUTION_APPROVED;
+  const previousPlan = process.env.PHASE4_PLAN_APPROVED;
   const calls = [];
   process.env.PREFLIGHT_SCOPE = scope;
   process.env.GITHUB_SHA = 'a'.repeat(40);
+  process.env.PREFLIGHT_INTENT = intent;
+  process.env.PHASE4_EXECUTION_APPROVED = authorized ? 'true' : 'false';
+  process.env.PHASE4_PLAN_APPROVED = planAuthorized ? 'true' : 'false';
   try {
     const report = new Report('preflight', directory);
     await preflight({ ...config, execution_enabled: authorized, availability_zones: selected },
@@ -42,6 +49,11 @@ async function simulate({ selected = [], backend = catalog.environments['demo-a'
     else process.env.PREFLIGHT_SCOPE = previousScope;
     if (previousRevision === undefined) delete process.env.GITHUB_SHA;
     else process.env.GITHUB_SHA = previousRevision;
+    for (const [name, value] of [['PREFLIGHT_INTENT', previousIntent], ['PHASE4_EXECUTION_APPROVED', previousExecution],
+      ['PHASE4_PLAN_APPROVED', previousPlan]]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -151,7 +163,7 @@ test('infra scope fails without a reviewed recovery strategy even when the clust
 
 function reviewedInfra() {
   return { ...structuredClone(unapprovedRuntime), approved: true, destroy_offline_verified: true,
-    endpoint: { ...unapprovedRuntime.endpoint, private_creation_reviewed: true, recovery_reference: 'offline-recovery-review' },
+    endpoint: { ...unapprovedRuntime.endpoint, private_creation_reviewed: true, teardown_reviewed: true, recovery_reference: 'offline-recovery-review' },
     preflight_authorization: { account: config.account, region: config.region, scope: 'infra',
       reference: 'offline-free-and-backend-review', valid_until: Math.floor(Date.now() / 1000) + 3600,
       free_plan_creation_reviewed: true, backend_permissions_reviewed: true,
@@ -275,4 +287,34 @@ test('unknown preflight scope is rejected before any AWS call', async () => {
   assert.equal(result.calls.length, 0);
   assert.equal(result.status, 1);
   assert.equal(result.data.checks[0].reason, 'PREFLIGHT_SCOPE_REJECTED');
+});
+
+test('read-only infra inspection ignores execution approvals and records future requirements as deferred', async () => {
+  const result = await simulate({ selected: config.availability_zones, scope: 'infra', intent: 'inspect',
+    respond: infrastructureResponses });
+  assert.equal(result.status, 0, JSON.stringify(result.data.checks));
+  for (const phase of ['execution-gate', 'service-entitlements', 'backend-permissions', 'connectivity', 'artifacts']) {
+    assert.equal(result.data.checks.find(check => check.phase === phase).status, 'DEFERRED');
+  }
+  assert.equal(result.data.environment_ready, false);
+  assert.equal(result.data.free_plan_documentation.account_configuration_eligibility_confirmed, false);
+});
+
+test('infra plan requires planning approval and backend review but never creation or recovery approvals', async () => {
+  const configuration = structuredClone(unapprovedRuntime);
+  configuration.preflight_authorization = reviewedInfra().preflight_authorization;
+  delete configuration.preflight_authorization.free_plan_creation_reviewed;
+  delete configuration.preflight_authorization.free_services_reviewed;
+  const options = { selected: config.availability_zones, scope: 'infra', intent: 'plan', configuration,
+    respond: infrastructureResponses };
+  const result = await simulate(options);
+  assert.equal(result.status, 0, JSON.stringify(result.data.checks));
+  assert.equal(result.data.checks.find(check => check.phase === 'service-entitlements').status, 'DEFERRED');
+  assert.equal(result.data.checks.find(check => check.phase === 'backend-permissions').status, 'PASS');
+  const denied = await simulate({ ...options, planAuthorized: false });
+  assert.equal(denied.status, 1);
+  assert.equal(denied.data.checks.find(check => check.phase === 'execution-gate').reason, 'PLAN_NOT_AUTHORIZED');
+  const unreviewed = structuredClone(configuration);
+  unreviewed.preflight_authorization.backend_permissions_reviewed = false;
+  assert.equal((await simulate({ ...options, configuration: unreviewed })).status, 1);
 });

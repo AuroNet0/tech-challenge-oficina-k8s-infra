@@ -4,10 +4,11 @@ $resolver = Join-Path $PSScriptRoot 'Resolve-Environment.ps1'
 $revision = 'b2e84c484c6dfb5b9fc8b502d3cc69310f52d4cf'
 $checks = 0
 $keys = @()
+$catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../phase4/environments/catalog.json') -Raw | ConvertFrom-Json
 foreach ($environmentId in @('demo-a', 'demo-b')) {
     foreach ($stackName in @('infra', 'platform', 'edge')) {
         $contract = & $resolver -EnvironmentId $environmentId -Stack $stackName -GitRevision $revision
-        if ($contract.Ready -or $null -ne $contract.Backend.bucket -or
+        if ($contract.Ready -or $contract.Backend.bucket -cne $catalog.environments.$environmentId.backend_bucket -or
             -not $contract.Backend.use_lockfile -or -not $contract.Backend.encrypt -or
             $contract.Backend.key -cne "phase4/environments/$environmentId/$stackName.tfstate" -or
             $keys -contains $contract.Backend.key) {
