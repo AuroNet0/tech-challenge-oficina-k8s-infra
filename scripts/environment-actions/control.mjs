@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { TerraformCommandError, formatTerraformDiagnostic } from './terraform-diagnostics.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const prefix = 'tc-oficina-p4-demo-a';
@@ -57,14 +58,22 @@ export class Report {
     const started = Date.now();
     let status = 'PASS';
     let reason = 'VERIFIED';
+    let failure;
     try {
       const result = await action();
       if (result?.deferred) { status = 'DEFERRED'; reason = 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS'; }
     } catch (error) {
       status = 'FAIL';
       reason = /^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message);
+      if (error instanceof TerraformCommandError) {
+        failure = { exit_code: error.exitCode, diagnostics: error.diagnostics };
+        for (const diagnostic of error.diagnostics) {
+          const message = formatTerraformDiagnostic(diagnostic).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+          console.error(`::${diagnostic.severity}::${message}`);
+        }
+      }
     }
-    this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next });
+    this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next, ...failure });
     this.write();
     return status === 'PASS';
   }
@@ -76,6 +85,13 @@ export class Report {
       `Run: ${this.data.run_id}, attempt: ${this.data.attempt}, revision: ${this.data.revision}`,
       '', '| Phase | Resource | Status | ms | Reason | Next action |', '|---|---|---|---:|---|---|',
       ...this.data.checks.map(check => `| ${check.phase} | ${check.resource} | ${check.status} | ${check.duration_ms} | ${check.reason} | ${check.next_action} |`)];
+    for (const check of this.data.checks.filter(check => check.diagnostics)) {
+      lines.push('', `## ${check.phase} (exit ${check.exit_code})`, '');
+      for (const diagnostic of check.diagnostics) {
+        const message = formatTerraformDiagnostic(diagnostic).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        lines.push(`<pre>${message}</pre>`, '');
+      }
+    }
     fs.writeFileSync(path.join(this.directory, 'summary.md'), lines.join('\n') + '\n');
   }
   finish() {

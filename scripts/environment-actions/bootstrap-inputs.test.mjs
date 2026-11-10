@@ -77,7 +77,7 @@ const revision = 'a'.repeat(40);
 const simulatedPlan = { resource_changes: [{ address: 'aws_iam_role.executor["provision"]',
   type: 'aws_iam_role', mode: 'managed', change: { actions: ['create'], after: { name: 'tc-oficina-p4-demo-a-provision' } } }] };
 
-function runExecutor(approvedHash, failure = '') {
+function runExecutor(approvedHash, failure = '', failureResult = { status: 1, stdout: '', stderr: 'AccessDenied: simulated offline failure' }) {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap-plan-only-'));
   try {
     const preload = path.join(temporary, 'mock-executables.mjs');
@@ -93,7 +93,7 @@ childProcess.spawnSync = (executable, argumentsList) => {
   if (executable !== 'terraform') throw new Error('UNEXPECTED_EXECUTABLE');
   const phase = argumentsList[1];
   if (!['fmt', 'init', 'validate', 'plan', 'show', 'apply'].includes(phase)) throw new Error('UNEXPECTED_PHASE');
-  if (phase === process.env.MOCK_FAILURE) return { status: 1, stdout: '', stderr: 'AccessDenied: simulated offline failure' };
+  if (phase === process.env.MOCK_FAILURE) return JSON.parse(process.env.MOCK_FAILURE_RESULT);
   return { status: 0, stdout: phase === 'show' ? ${JSON.stringify(JSON.stringify(simulatedPlan))} : '{}', stderr: '' };
 };
 syncBuiltinESMExports();
@@ -103,13 +103,16 @@ syncBuiltinESMExports();
         GITHUB_REF: 'refs/heads/homolog', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: revision,
         APPROVED_PLAN_SHA256: approvedHash, RUNNER_TEMP: temporary, REPORT_DIR: temporary,
         GITHUB_STEP_SUMMARY: path.join(temporary, 'github-summary.md'), MOCK_CALLS: path.join(temporary, 'calls.jsonl'),
-        MOCK_FAILURE: failure, AWS_EC2_METADATA_DISABLED: 'true', NODE_OPTIONS: '' }, timeout: 15000,
+        MOCK_FAILURE: failure, MOCK_FAILURE_RESULT: JSON.stringify(failureResult),
+        DIAGNOSTIC_TEST_SECRET: 'environment-secret-fixture', AWS_EC2_METADATA_DISABLED: 'true', NODE_OPTIONS: '' }, timeout: 15000,
     });
     assert.equal(result.error, undefined);
     assert.ok(fs.existsSync(path.join(temporary, 'calls.jsonl')), result.stderr || result.stdout);
     const calls = fs.readFileSync(path.join(temporary, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     const report = JSON.parse(fs.readFileSync(path.join(temporary, 'report.json')));
-    return { status: result.status, phases: calls.filter(([executable]) => executable === 'terraform').map(([, argumentsList]) => argumentsList[1]), report };
+    return { status: result.status, phases: calls.filter(([executable]) => executable === 'terraform').map(([, argumentsList]) => argumentsList[1]), report,
+      log: result.stdout + result.stderr, summary: fs.readFileSync(path.join(temporary, 'summary.md'), 'utf8'),
+      githubSummary: fs.readFileSync(path.join(temporary, 'github-summary.md'), 'utf8') };
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
@@ -136,6 +139,51 @@ test('actual bootstrap entrypoint retains failed plan diagnostics without apply'
   assert.deepEqual(result.phases, ['fmt', 'init', 'validate', 'plan']);
   assert.ok(result.report.checks.some(check => check.phase === 'terraform-plan' && check.status === 'FAIL' && check.reason === 'AccessDenied'));
 });
+
+test('validate JSON failure publishes sanitized diagnostics on every surface and preserves exit code', () => {
+  const result = runExecutor('', 'validate', { status: 2, stderr: '', stdout: JSON.stringify({
+    valid: false, diagnostics: [
+      { severity: 'error', summary: 'Unsupported attribute',
+        detail: 'This object has no attribute named example. password="password-fixture" token=token-fixture environment-secret-fixture',
+        range: { filename: 'main.tf', start: { line: 42, column: 5 } },
+        snippet: { code: 'do-not-publish-source' } },
+      { severity: 'warning', summary: 'Deprecated argument', detail: 'Use the replacement argument.' },
+    ],
+  }) });
+  assert.equal(result.status, 2);
+  assert.deepEqual(result.phases, ['fmt', 'init', 'validate']);
+  const check = result.report.checks.at(-1);
+  assert.equal(check.status, 'FAIL');
+  assert.equal(check.exit_code, 2);
+  assert.deepEqual(check.diagnostics[0].range, { filename: 'main.tf', start: { line: 42 } });
+  assert.equal(check.diagnostics[1].severity, 'warning');
+  for (const output of [JSON.stringify(result.report), result.summary, result.githubSummary, result.log]) {
+    assert.match(output, /Unsupported attribute/);
+    assert.match(output, /This object has no attribute/);
+    assert.match(output, /main.tf/);
+    assert.match(output, /42/);
+    assert.match(output, /Deprecated argument/);
+    assert.doesNotMatch(output, /password-fixture|token-fixture|environment-secret-fixture|do-not-publish-source/);
+  }
+});
+
+for (const phase of ['init', 'plan']) {
+  test(`${phase} provider failure in stderr retains useful sanitized output and stops execution`, () => {
+    const result = runExecutor('', phase, { status: 1, stdout: 'normal output withheld',
+      stderr: '\u001b[31mError: Failed to install provider\u001b[0m\nregistry.terraform.io/hashicorp/aws: checksum mismatch\n'
+        + 'aws_secret_access_key="provider-secret-fixture"\nAuthorization: Bearer bearer-fixture\n'
+        + 'https://user:password-url-fixture@example.test/provider?X-Amz-Signature=signature-fixture\n'
+        + '  12: password = "source-fixture"\n::error::injection-fixture' });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.phases, phase === 'init' ? ['fmt', 'init'] : ['fmt', 'init', 'validate', 'plan']);
+    for (const output of [JSON.stringify(result.report), result.summary, result.githubSummary, result.log]) {
+      assert.match(output, /Failed to install provider/);
+      assert.match(output, /registry.terraform.io\/hashicorp\/aws: checksum mismatch/);
+      assert.doesNotMatch(output, /provider-secret-fixture|bearer-fixture|password-url-fixture|signature-fixture|source-fixture|normal output withheld/);
+    }
+    assert.doesNotMatch(result.log, /\n::error::injection-fixture/);
+  });
+}
 
 test('apply path requires the exact reviewed hash, with all external commands mocked', () => {
   const result = runExecutor(reviewPlan(simulatedPlan, revision).sha256);

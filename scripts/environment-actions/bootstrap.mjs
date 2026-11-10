@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Report, aws, context, root } from './control.mjs';
 import { command } from './diagnostics.mjs';
+import { TerraformCommandError } from './terraform-diagnostics.mjs';
 
 const boundaries = ['eks-cluster', 'eks-nodes', 'ebs-csi', 'load-balancer-controller', 'auth-lambda'];
 const variableNames = new Set(['environment_id', 'aws_account_id', 'aws_region', 'backend_bucket',
@@ -69,7 +70,7 @@ async function main() {
     const directory = path.join(root, 'phase4/bootstrap/identities');
     const invoke = argumentsList => {
       const result = command('terraform', [`-chdir=${directory}`, ...argumentsList]);
-      if (result.status !== 0) throw new Error(result.reason);
+      if (result.status !== 0) throw new TerraformCommandError(result);
       return result.stdout;
     };
     for (const argumentsList of [
@@ -102,7 +103,8 @@ async function main() {
     await report.check('bootstrap', 'configuration or executor', () => { throw new Error('BOOTSTRAP_EXECUTION_FAILED'); });
   } finally {
     if (planFile && fs.existsSync(planFile)) fs.unlinkSync(planFile);
-    process.exitCode = report.finish();
+    const status = report.finish();
+    process.exitCode = report.data.checks.find(check => check.exit_code)?.exit_code || status;
   }
 }
 
