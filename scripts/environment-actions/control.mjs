@@ -69,7 +69,10 @@ export class Report {
     let failure;
     try {
       const result = await action();
-      if (result?.deferred) { status = 'DEFERRED'; reason = 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS'; }
+      if (result?.deferred) {
+        status = 'DEFERRED';
+        reason = /^[A-Z_]{3,100}$/.test(result.reason || '') ? result.reason : 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS';
+      }
     } catch (error) {
       status = 'FAIL';
       reason = /^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message);
@@ -95,6 +98,7 @@ export class Report {
     fs.writeFileSync(path.join(this.directory, 'report.json'), JSON.stringify(this.data, null, 2));
     const lines = [`# Environment ${this.data.operation}: ${this.data.result}`,
       `Run: ${this.data.run_id}, attempt: ${this.data.attempt}, revision: ${this.data.revision}`,
+      ...(this.data.scope ? [`Scope: ${this.data.scope}; environment readiness is not attested.`] : []),
       '', '| Phase | Resource | Status | ms | Reason | Next action |', '|---|---|---|---:|---|---|',
       ...this.data.checks.map(check => `| ${check.phase} | ${check.resource} | ${check.status} | ${check.duration_ms} | ${check.reason} | ${check.next_action} |`)];
     for (const check of this.data.checks.filter(check => check.diagnostics)) {
@@ -212,32 +216,59 @@ function tcp(host) {
   });
 }
 
-export async function preflight(config, catalog, report, call = aws, connect = tcp) {
+export function verifyInfraInputs(config, runtime) {
+  const inputs = runtime.terraform_inputs?.infra || {};
+  const roles = Object.fromEntries(['provision', 'deploy', 'destroy'].map(purpose =>
+    [purpose, `arn:aws:iam::${config.account}:role/${prefix}-${purpose}`]));
+  verify(JSON.stringify(inputs.availability_zones) === JSON.stringify(config.availability_zones)
+    && inputs.node_count === config.node_count && inputs.node_count === 2
+    && inputs.kubernetes_version === config.eks_version && inputs.postgres_version === config.postgres_version
+    && inputs.db_instance_class === config.rds_class && inputs.db_allocated_storage === 20
+    && inputs.eks_admin_role_arn === roles.provision
+    && Object.keys(inputs.automation_roles || {}).length === 3
+    && Object.entries(roles).every(([purpose, arn]) => inputs.automation_roles?.[purpose] === arn)
+    && Object.keys(inputs.workload_permissions_boundaries || {}).length === 2
+    && ['eks-cluster', 'eks-nodes'].every(name => inputs.workload_permissions_boundaries?.[name]
+      === `arn:aws:iam::${config.account}:policy/${prefix}-${name}-boundary`)
+    && Array.isArray(inputs.eks_public_access_cidrs) && inputs.eks_public_access_cidrs.length === 0,
+  'INFRA_INPUTS_NOT_REVIEWED');
+}
+
+export async function preflight(config, catalog, report, call = aws, connect = tcp, runtimeOverride) {
   const runtimeFile = path.join(root, 'phase4/environments/demo-a.runtime.json');
-  const runtime = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {};
+  const runtime = runtimeOverride ?? (fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {});
+  const scope = process.env.PREFLIGHT_SCOPE || 'full';
+  if (!await report.check('preflight-scope', 'requested scope', () => verify(['infra', 'full'].includes(scope), 'PREFLIGHT_SCOPE_REJECTED'))) return;
+  report.data.scope = scope;
+  const review = runtime.preflight_authorization || {};
+  const reviewCurrent = () => runtime.approved === true && review.account === config.account && review.region === config.region
+    && review.scope === scope
+    && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
+    && typeof review.reference === 'string' && review.reference.trim().length > 0;
   const identityValid = await report.check('identity', 'STS', () => {
     const identity = call('sts', 'get-caller-identity');
     verify(identity.Account === config.account && /^arn:aws:sts::446517826146:assumed-role\/tc-oficina-p4-demo-a-provision\//.test(identity.Arn), 'OIDC_PROVISION_ROLE_REQUIRED');
   }, 'Install the provision role using the separate bootstrap procedure; never use root keys.');
   if (!identityValid) return;
   await report.check('configuration', 'catalog metadata', () => verify(catalog.aws_account_id === config.account
+    && catalog.aws_region === config.region
     && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket || ''), 'CATALOG_INCOMPLETE'));
   await report.check('execution-gate', 'catalog and execution authorization', () => {
     verify(catalog.enabled, 'CATALOG_DISABLED');
     verify(config.execution_enabled === true, 'EXECUTION_DISABLED');
   });
+  if (scope === 'infra') await report.check('infra-inputs', 'Terraform and preflight contracts', () => verifyInfraInputs(config, runtime));
   await report.check('account-plan', 'Free Tier', () => {
     const plan = call('freetier', 'get-account-plan-state');
     verify(plan.accountPlanType === 'FREE' && plan.accountPlanStatus === 'ACTIVE', 'ACCOUNT_PLAN_INCOMPATIBLE');
   }, 'Verify plan status in AWS Console; do not upgrade implicitly.');
   await report.check('service-entitlements', 'FREE account-specific operator review', () => {
-    const review = runtime.preflight_authorization || {};
-    verify(runtime.approved && review.account === config.account && review.region === config.region
-      && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
-      && ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager'].every(service => review.free_services_reviewed?.includes(service))
-      && typeof review.reference === 'string' && review.reference.length > 0, 'SERVICE_ENTITLEMENTS_NOT_PROVEN');
+    const services = scope === 'infra' ? ['eks', 'rds', 'ec2', 'ecr', 'secretsmanager', 'logs', 'iam']
+      : ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager', 'logs', 'iam'];
+    verify(reviewCurrent() && review.free_plan_creation_reviewed === true
+      && services.every(service => review.free_services_reviewed?.includes(service)), 'SERVICE_ENTITLEMENTS_NOT_PROVEN');
   },
-    'Read APIs cannot prove permission to create EKS/RDS/ELB on FREE. Obtain account-specific evidence and implement its validation.');
+    'Operator must review FREE creation eligibility for the services/configurations in this scope, credits and expiry; record a current evidence reference. Get/List calls do not prove creation eligibility.');
   await report.check('backend', 'S3 persistent backend', () => {
     const bucket = catalog.backend_bucket;
     verify(typeof bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket), 'BACKEND_NOT_CONFIGURED');
@@ -251,8 +282,8 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     call('s3api', 'list-objects-v2', [...owner, '--prefix', 'phase4/environments/demo-a/', '--max-keys', '10']);
   }, 'Select a private, encrypted, versioned backend in us-east-1. No write probe is performed.');
   await report.check('backend-permissions', 'operator review of backend state and lock writes', () => {
-    verify(runtime.approved && runtime.preflight_authorization?.backend_permissions_reviewed === true
-      && runtime.preflight_authorization?.valid_until > Date.now() / 1000, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
+    verify(reviewCurrent() && review.backend_permissions_reviewed === true
+      && runtime.backend_bucket === catalog.backend_bucket, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
   },
     'Review exact state and .tflock permissions; read-only checks cannot prove writes.');
   await report.check('oidc', 'GitHub provider', () => {
@@ -340,7 +371,11 @@ export async function preflight(config, catalog, report, call = aws, connect = t
       && repositories.every(item => known.some(resource => resource.arn === item.repositoryArn)), 'EXISTING_RESOURCES_REQUIRE_STATE_RECONCILIATION');
   }, 'Review the failed AWS call and required permissions against the configured backend; reconcile exact ARNs before any IAM or state change.');
   await report.check('connectivity', 'private Kubernetes endpoint', async () => {
-    if (process.env.PREFLIGHT_SCOPE === 'infra') {
+    if (scope === 'infra') {
+      verify(['broker', 'existing-private'].includes(config.runner_mode) && runtime.endpoint?.mode === config.runner_mode
+        && runtime.endpoint.private_creation_reviewed === true && runtime.destroy_offline_verified === true
+        && typeof runtime.endpoint.recovery_reference === 'string' && runtime.endpoint.recovery_reference.trim().length > 0,
+      'EKS_RECOVERY_STRATEGY_NOT_REVIEWED');
       try {
         const cluster = call('eks', 'describe-cluster', ['--name', prefix]).cluster;
         verify(cluster.resourcesVpcConfig.endpointPrivateAccess && !cluster.resourcesVpcConfig.endpointPublicAccess, 'INFRA_REQUIRES_CLOSED_ENDPOINT');
@@ -367,8 +402,11 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     } catch (error) { if (error.message !== 'ResourceNotFound') throw error; }
     verify(typeof host === 'string' && /^[a-zA-Z0-9.-]+$/.test(host), 'PRIVATE_PATH_PROBE_REQUIRED');
     await connect(host);
-  }, 'Provide an existing private runner with routing, DNS and outbound GitHub access. A TCP probe is not Kubernetes authorization.');
+  }, scope === 'infra'
+    ? 'Review private creation and recovery; Kubernetes access and the independent canary must be proven after cluster creation, before dependent phases or any public opening.'
+    : 'Provide an existing private runner with routing, DNS and outbound GitHub access. A TCP probe is not Kubernetes authorization.');
   await report.check('artifacts', 'four reviewed service revisions', () => {
+    if (scope === 'infra') return { deferred: true, reason: 'SERVICE_ARTIFACTS_REQUIRED_AFTER_INFRA' };
     for (const service of ['auth', 'os', 'execution', 'billing']) {
       const source = runtime.services?.[service];
       verify(source && /^AuroNet0\/tech-challenge-oficina-[a-z-]+$/.test(source.repository)
@@ -381,7 +419,9 @@ export async function preflight(config, catalog, report, call = aws, connect = t
         return check && check.head_sha === source.revision && check.status === 'completed' && check.conclusion === 'success';
       }), 'APPROVED_SERVICE_CI_REQUIRED');
     }
-  }, 'Pin clean revisions and verify source access, CI, CA, signing, ACM, Mercado Pago and New Relic inputs.');
+  }, scope === 'infra'
+    ? 'Service publication and external integrations are deferred until their dependent phases; no application readiness is attested by Infra.'
+    : 'Pin clean revisions and verify source access, CI, CA, signing, ACM, Mercado Pago and New Relic inputs.');
 }
 
 async function main() {

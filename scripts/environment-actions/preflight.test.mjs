@@ -3,45 +3,55 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { availabilityEvidence, preflight, Report, root } from './control.mjs';
+import { availabilityEvidence, preflight, Report, root, verifyInfraInputs } from './control.mjs';
 
 const config = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/actions-first.json')));
 const catalog = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/catalog.json')));
+const runtime = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/demo-a.runtime.json')));
+const unapprovedRuntime = { ...structuredClone(runtime), approved: false, destroy_offline_verified: false,
+  endpoint: { mode: 'broker', independent_canary_verified: false, private_creation_reviewed: false, recovery_reference: '' },
+  preflight_authorization: {}, services: {}, mercado_pago_test_secret_arn: '', new_relic_secret_arn: '' };
 const zones = ['a', 'b'].map((suffix, index) => ({ ZoneName: `us-east-1${suffix}`, ZoneId: `use1-az${index + 1}`,
   State: 'available', ZoneType: 'availability-zone', OptInStatus: 'opt-in-not-required' }));
 const offerings = zones.map(zone => ({ InstanceType: 'm7i-flex.large', LocationType: 'availability-zone', Location: zone.ZoneName }));
 
 async function simulate({ selected = [], backend = catalog.environments['demo-a'].backend_bucket,
-  offered = offerings, scope = 'full', respond = () => { throw new Error('AccessDenied password=private-fixture'); } } = {}) {
+  offered = offerings, scope = 'full', configuration = unapprovedRuntime, authorized = false,
+  respond = () => { throw new Error('AccessDenied password=private-fixture'); } } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-offline-'));
   const previousScope = process.env.PREFLIGHT_SCOPE;
+  const previousRevision = process.env.GITHUB_SHA;
   const calls = [];
   process.env.PREFLIGHT_SCOPE = scope;
+  process.env.GITHUB_SHA = 'a'.repeat(40);
   try {
     const report = new Report('preflight', directory);
-    await preflight({ ...config, availability_zones: selected }, { ...catalog.environments['demo-a'], backend_bucket: backend }, report,
+    await preflight({ ...config, execution_enabled: authorized, availability_zones: selected },
+      { ...catalog.environments['demo-a'], enabled: authorized, backend_bucket: backend }, report,
       (service, operation, parameters = []) => {
         calls.push({ service, operation, parameters });
         if (service === 'sts') return { Account: config.account, Arn: `arn:aws:sts::${config.account}:assumed-role/tc-oficina-p4-demo-a-provision/offline` };
         if (operation === 'describe-availability-zones') return { AvailabilityZones: zones };
         if (operation === 'describe-instance-type-offerings') return { InstanceTypeOfferings: offered };
         return respond(service, operation, parameters);
-      }, async () => { throw new Error('NETWORK_FORBIDDEN'); });
+      }, async () => { throw new Error('NETWORK_FORBIDDEN'); }, configuration);
     return { calls, data: report.data, status: report.finish(),
       summary: fs.readFileSync(path.join(directory, 'summary.md'), 'utf8') };
   } finally {
     if (previousScope === undefined) delete process.env.PREFLIGHT_SCOPE;
     else process.env.PREFLIGHT_SCOPE = previousScope;
+    if (previousRevision === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previousRevision;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 
-test('catalog contains confirmed demo-a metadata while all execution gates and demo-b stay disabled', () => {
+test('catalog metadata and infra inputs match demo-a while demo-b stays disabled', () => {
   assert.equal(catalog.environments['demo-a'].aws_account_id, '446517826146');
   assert.equal(catalog.environments['demo-a'].backend_bucket, 'tech-challenge-oficina-terraform-state-b1cfa326');
-  assert.equal(catalog.environments['demo-a'].enabled, false);
-  assert.equal(config.execution_enabled, false);
-  assert.deepEqual(config.availability_zones, []);
+  assert.equal(typeof catalog.environments['demo-a'].enabled, 'boolean');
+  assert.equal(typeof config.execution_enabled, 'boolean');
+  assert.deepEqual(config.availability_zones, ['us-east-1a', 'us-east-1b']);
   assert.deepEqual(catalog.environments['demo-b'], { enabled: false, aws_account_id: null, aws_region: 'us-east-1',
     project_name: 'oficina', resource_prefix: 'tc', owner: 'tech-challenge-oficina', backend_bucket: null,
     state_keys: { infra: 'phase4/environments/demo-b/infra.tfstate', platform: 'phase4/environments/demo-b/platform.tfstate',
@@ -129,12 +139,140 @@ test('a missing inventory object does not hide a subsequent tagging API denial',
   assert.deepEqual(check.aws_call, { service: 'resourcegroupstaggingapi', operation: 'get-resources' });
 });
 
-test('infra scope keeps post-EKS connectivity deferred and never reports a ready environment', async () => {
+test('infra scope fails without a reviewed recovery strategy even when the cluster is absent', async () => {
   const result = await simulate({ scope: 'infra', respond: () => { throw new Error('ResourceNotFound'); } });
   const check = result.data.checks.find(check => check.phase === 'connectivity');
-  assert.equal(check.status, 'DEFERRED');
-  assert.equal(check.reason, 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS');
+  assert.equal(check.status, 'FAIL');
+  assert.equal(check.reason, 'EKS_RECOVERY_STRATEGY_NOT_REVIEWED');
   assert.equal(result.data.environment_ready, false);
   assert.equal(result.calls.some(call => call.service === 'lambda'), false);
   assert.equal(result.status, 1);
+});
+
+function reviewedInfra() {
+  return { ...structuredClone(unapprovedRuntime), approved: true, destroy_offline_verified: true,
+    endpoint: { ...unapprovedRuntime.endpoint, private_creation_reviewed: true, recovery_reference: 'offline-recovery-review' },
+    preflight_authorization: { account: config.account, region: config.region, scope: 'infra',
+      reference: 'offline-free-and-backend-review', valid_until: Math.floor(Date.now() / 1000) + 3600,
+      free_plan_creation_reviewed: true, backend_permissions_reviewed: true,
+      free_services_reviewed: ['eks', 'rds', 'ec2', 'ecr', 'secretsmanager', 'logs', 'iam'] } };
+}
+
+function infrastructureResponses(service, operation, parameters) {
+  if (operation === 'get-account-plan-state') return { accountPlanType: 'FREE', accountPlanStatus: 'ACTIVE' };
+  if (operation === 'get-bucket-location') return { LocationConstraint: null };
+  if (operation === 'get-bucket-versioning') return { Status: 'Enabled' };
+  if (operation === 'get-bucket-encryption') return { ServerSideEncryptionConfiguration: { Rules: [{}] } };
+  if (operation === 'get-public-access-block') return { PublicAccessBlockConfiguration: {
+    BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true } };
+  if (operation === 'list-objects-v2') return { Contents: [] };
+  if (operation === 'get-object') throw new Error('NoSuchKey');
+  if (operation === 'get-open-id-connect-provider') return { ClientIDList: ['sts.amazonaws.com'], Url: 'token.actions.githubusercontent.com' };
+  if (operation === 'get-role') {
+    const name = parameters[1];
+    const purpose = name.split('demo-a-')[1];
+    return { Role: { Arn: `arn:aws:iam::${config.account}:role/${name}`, AssumeRolePolicyDocument: { Statement: [{
+      Effect: 'Allow', Action: 'sts:AssumeRoleWithWebIdentity',
+      Principal: { Federated: `arn:aws:iam::${config.account}:oidc-provider/token.actions.githubusercontent.com` },
+      Condition: { StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
+        'token.actions.githubusercontent.com:sub': `repo:${config.repository}:environment:phase4-demo-a-${purpose}` } },
+    }] } } };
+  }
+  if (operation === 'describe-cluster-versions') return { clusterVersions: [{ clusterVersion: '1.35', status: 'STANDARD_SUPPORT' }] };
+  if (operation === 'describe-db-engine-versions') return { DBEngineVersions: [{ EngineVersion: '17.10', Status: 'available' }] };
+  if (operation === 'describe-orderable-db-instance-options') return { OrderableDBInstanceOptions: [{}] };
+  if (operation === 'describe-instance-types') return { InstanceTypes: [{ VCpuInfo: { DefaultVCpus: 2 } }] };
+  if (operation === 'get-service-quota') return { Quota: { Value: 8 } };
+  if (operation === 'describe-instances') return { Reservations: [] };
+  if (operation === 'get-resources') return { ResourceTagMappingList: [] };
+  if (operation === 'list-clusters') return { clusters: [] };
+  if (operation === 'describe-db-instances') return { DBInstances: [] };
+  if (operation === 'describe-vpcs') return { Vpcs: [] };
+  if (operation === 'describe-repositories') return { repositories: [] };
+  if (operation === 'describe-cluster') throw new Error('ResourceNotFound');
+  throw new Error('UNEXPECTED_OFFLINE_CALL');
+}
+
+test('reviewed infra preflight succeeds without applications, external integrations or a nonexistent cluster canary', async () => {
+  const result = await simulate({ selected: config.availability_zones, scope: 'infra', authorized: true,
+    configuration: reviewedInfra(), respond: infrastructureResponses });
+  assert.equal(result.status, 0, JSON.stringify(result.data.checks));
+  assert.equal(result.data.scope, 'infra');
+  assert.equal(result.data.environment_ready, false);
+  assert.equal(result.data.checks.find(check => check.phase === 'connectivity').status, 'DEFERRED');
+  const artifacts = result.data.checks.find(check => check.phase === 'artifacts');
+  assert.equal(artifacts.status, 'DEFERRED');
+  assert.equal(artifacts.reason, 'SERVICE_ARTIFACTS_REQUIRED_AFTER_INFRA');
+  assert.equal(result.calls.some(call => call.service === 'lambda'), false);
+});
+
+test('infra with complete evidence still fails when execution is disabled', async () => {
+  const result = await simulate({ selected: config.availability_zones, scope: 'infra',
+    configuration: reviewedInfra(), respond: infrastructureResponses });
+  assert.equal(result.data.checks.find(check => check.phase === 'execution-gate').reason, 'CATALOG_DISABLED');
+  assert.equal(result.status, 1);
+});
+
+for (const missing of ['approval', 'credits-review', 'service', 'expiry', 'scope', 'backend-review', 'recovery']) {
+  test(`infra preflight cannot replace missing ${missing} with a fictitious PASS`, async () => {
+    const configuration = reviewedInfra();
+    const review = configuration.preflight_authorization;
+    if (missing === 'approval') configuration.approved = false;
+    if (missing === 'credits-review') review.free_plan_creation_reviewed = false;
+    if (missing === 'service') review.free_services_reviewed = review.free_services_reviewed.filter(service => service !== 'eks');
+    if (missing === 'expiry') review.valid_until = 1;
+    if (missing === 'scope') review.scope = 'full';
+    if (missing === 'backend-review') review.backend_permissions_reviewed = false;
+    if (missing === 'recovery') configuration.endpoint.private_creation_reviewed = false;
+    const result = await simulate({ selected: config.availability_zones, scope: 'infra', authorized: true,
+      configuration, respond: infrastructureResponses });
+    assert.equal(result.status, 1);
+    const phase = missing === 'recovery' ? 'connectivity' : missing === 'backend-review' ? 'backend-permissions' : 'service-entitlements';
+    assert.equal(result.data.checks.find(check => check.phase === phase).status, 'FAIL');
+    assert.equal(result.data.environment_ready, false);
+  });
+}
+
+test('full scope keeps recovery and application requirements and rejects an infra-only FREE review', async () => {
+  const result = await simulate({ selected: config.availability_zones, authorized: true,
+    configuration: reviewedInfra(), respond: infrastructureResponses });
+  for (const phase of ['service-entitlements', 'connectivity', 'artifacts']) {
+    assert.equal(result.data.checks.find(check => check.phase === phase).status, 'FAIL');
+  }
+});
+
+test('infra preserves real API failures and never defers a public cluster endpoint', async () => {
+  for (const denied of [true, false]) {
+    const result = await simulate({ selected: config.availability_zones, scope: 'infra', authorized: true,
+      configuration: reviewedInfra(), respond: (service, operation, parameters) => {
+        if (operation === 'describe-cluster') {
+          if (denied) throw new Error('AccessDenied');
+          return { cluster: { resourcesVpcConfig: { endpointPublicAccess: true, endpointPrivateAccess: true } } };
+        }
+        return infrastructureResponses(service, operation, parameters);
+      } });
+    const check = result.data.checks.find(check => check.phase === 'connectivity');
+    assert.equal(check.status, 'FAIL');
+    assert.equal(check.reason, denied ? 'AccessDenied' : 'INFRA_REQUIRES_CLOSED_ENDPOINT');
+    assert.match(result.summary, new RegExp(check.reason));
+    assert.equal(result.status, 1);
+  }
+});
+
+test('infra inputs must match the reviewed runtime contract and preserve a private endpoint', () => {
+  assert.doesNotThrow(() => verifyInfraInputs(config, runtime));
+  for (const override of [{ node_count: 1 }, { availability_zones: ['us-east-1b', 'us-east-1a'] },
+    { kubernetes_version: '1.34' }, { eks_public_access_cidrs: ['0.0.0.0/0'] }, { automation_roles: {} },
+    { workload_permissions_boundaries: {} }]) {
+    const changed = structuredClone(runtime);
+    Object.assign(changed.terraform_inputs.infra, override);
+    assert.throws(() => verifyInfraInputs(config, changed), /INFRA_INPUTS_NOT_REVIEWED/);
+  }
+});
+
+test('unknown preflight scope is rejected before any AWS call', async () => {
+  const result = await simulate({ scope: 'skip' });
+  assert.equal(result.calls.length, 0);
+  assert.equal(result.status, 1);
+  assert.equal(result.data.checks[0].reason, 'PREFLIGHT_SCOPE_REJECTED');
 });

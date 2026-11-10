@@ -13,10 +13,10 @@ const array = value => Array.isArray(value) ? value : [value];
 const documents = Object.fromEntries(Object.entries(inputs.workload_boundary_documents)
   .map(([name, document]) => [name, JSON.parse(document)]));
 
-test('first bootstrap inputs match the installed account, backend and classic Environment subjects', () => {
+test('first bootstrap inputs match the installed account, backend and immutable Environment subjects', () => {
   assert.doesNotThrow(() => validateInputs(inputs));
   assert.equal(inputs.backend_bucket, 'tech-challenge-oficina-terraform-state-b1cfa326');
-  assert.equal(inputs.subject_format, 'classic');
+  assert.equal(inputs.subject_format, 'immutable');
   assert.deepEqual(inputs.inventory, {});
   assert.equal(inputs.inventory_approved, false);
   assert.deepEqual(inputs.external_input_secrets, {});
@@ -26,6 +26,15 @@ test('first bootstrap inputs match the installed account, backend and classic En
   const catalog = JSON.parse(fs.readFileSync(new URL('../../phase4/environments/catalog.json', import.meta.url)));
   assert.equal(catalog.environments['demo-a'].enabled, false);
   assert.equal(catalog.environments['demo-b'].enabled, false);
+});
+
+test('bootstrap accepts classic and immutable subject formats and rejects unsupported formats', () => {
+  for (const format of ['classic', 'immutable']) {
+    assert.doesNotThrow(() => validateInputs({ ...inputs, subject_format: format }));
+  }
+  for (const format of ['unsupported', '', undefined]) {
+    assert.throws(() => validateInputs({ ...inputs, subject_format: format }), /BOOTSTRAP_INPUTS_NOT_APPROVED/);
+  }
 });
 
 test('all five serialized boundaries match the readable review documents and IAM limits', () => {

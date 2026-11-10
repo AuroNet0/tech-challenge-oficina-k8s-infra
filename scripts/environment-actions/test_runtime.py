@@ -40,13 +40,11 @@ class RuntimeTests(unittest.TestCase):
         guard('destroy', self.config, dict(self.catalog, enabled=False),
               dict(self.environment, CONFIRMATION='DESTROY demo-a'))
 
-    def test_new_configuration_is_disabled(self):
-        from runtime import ROOT
-        configuration = json.loads((ROOT / 'phase4/environments/demo-a.runtime.json').read_text())
-        self.assertFalse(configuration['approved'])
-        catalog = json.loads((ROOT / 'phase4/environments/catalog.json').read_text())
-        self.assertFalse(catalog['environments']['demo-a']['enabled'])
-        self.assertFalse(catalog['environments']['demo-b']['enabled'])
+    def test_unapproved_configuration_cannot_pass_the_execution_gate(self):
+        with self.assertRaisesRegex(Failure, 'BACKEND_NOT_APPROVED'):
+            guard('up', dict(self.config, approved=False), self.catalog, self.environment)
+        with self.assertRaisesRegex(Failure, 'DESTROY_VALIDATION_REQUIRED'):
+            guard('up', dict(self.config, destroy_offline_verified=False), self.catalog, self.environment)
 
     def test_plan_only_does_not_apply_and_hash_binds_approved_changes(self):
         document = dict(resource_changes=[dict(address='aws_vpc.environment', change=dict(actions=['create']))])
