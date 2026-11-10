@@ -51,7 +51,6 @@ jobs:
           role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-bootstrap
           role-session-name: bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
           aws-region: us-east-1
-          allowed-account-ids: '446517826146'
           unset-current-credentials: true
       - name: Plan or install approved persistent bootstrap resources
         env:
