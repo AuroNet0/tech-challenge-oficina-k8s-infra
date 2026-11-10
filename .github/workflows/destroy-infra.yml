@@ -1,0 +1,83 @@
+name: Destroy Kubernetes Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Digite DESTROY para confirmar'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: terraform
+
+jobs:
+  destroy:
+    name: Destroy Kubernetes Infrastructure
+    runs-on: ubuntu-latest
+    if: inputs.confirmation == 'DESTROY'
+
+    environment: production
+
+    concurrency:
+      group: destroy-k8s-infra
+      cancel-in-progress: false
+
+    env:
+      # New Relic provider ainda precisa ser inicializado pelo Terraform,
+      # mesmo com os recursos New Relic já desabilitados/removidos.
+      NEW_RELIC_API_KEY: ${{ secrets.NEW_RELIC_API_KEY }}
+      NEW_RELIC_ACCOUNT_ID: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+      NEW_RELIC_REGION: ${{ vars.NEW_RELIC_REGION }}
+
+      TF_VAR_new_relic_api_key: ${{ secrets.NEW_RELIC_API_KEY }}
+      TF_VAR_new_relic_account_id: ${{ vars.NEW_RELIC_ACCOUNT_ID }}
+      TF_VAR_new_relic_region: ${{ vars.NEW_RELIC_REGION }}
+      TF_VAR_new_relic_api_base_url: ${{ vars.NEW_RELIC_API_BASE_URL }}
+
+      # Força Gateway e New Relic desabilitados durante o destroy
+      TF_VAR_enable_api_gateway: "false"
+      TF_VAR_enable_new_relic: "false"
+      TF_VAR_api_backend_url: ${{ vars.API_BACKEND_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform plan destroy
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform plan -destroy -input=false \
+            -var="enable_api_gateway=false" \
+            -var="api_backend_url=${{ vars.API_BACKEND_URL }}" \
+            -var="enable_new_relic=false" \
+            -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" \
+            -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
+
+      - name: Terraform destroy
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform destroy -auto-approve -input=false \
+            -var="enable_api_gateway=false" \
+            -var="api_backend_url=${{ vars.API_BACKEND_URL }}" \
+            -var="enable_new_relic=false" \
+            -var="new_relic_account_id=${{ vars.NEW_RELIC_ACCOUNT_ID }}" \
+            -var="new_relic_api_base_url=${{ vars.NEW_RELIC_API_BASE_URL }}"
