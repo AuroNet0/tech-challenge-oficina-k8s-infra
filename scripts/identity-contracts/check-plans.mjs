@@ -41,6 +41,13 @@ assert.equal(allowed(documents.recovery, 'eks:UpdateClusterConfig', cluster, clo
 assert.equal(allowed(documents.recovery, 'eks:UpdateClusterConfig', cluster, { ...closed, 'eks:endpointPublicAccess': 'true' }), false);
 assert.equal(allowed(documents.recovery, 'eks:UpdateClusterConfig', cluster.replace('demo-a', 'demo-b'), closed), false);
 assert.equal(allowed(documents.recovery, 'eks:DeleteCluster', cluster), false);
+const bootstrapEntry = `arn:aws:eks:us-east-1:${account}:access-entry/tc-oficina-p4-demo-a/role/${account}/tc-oficina-p4-demo-a-provision/fixture`;
+const bootstrapPolicy = { 'eks:principalArn': `${prefix}provision`, 'eks:policyArn': 'arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy' };
+assert.equal(allowed(documents.recovery, 'eks:DisassociateAccessPolicy', bootstrapEntry, bootstrapPolicy), true);
+assert.equal(allowed(documents.recovery, 'eks:DisassociateAccessPolicy', bootstrapEntry, { ...bootstrapPolicy, 'eks:principalArn': `${prefix}deploy` }), false);
+assert.equal(allowed(documents.recovery, 'eks:DisassociateAccessPolicy', bootstrapEntry.replaceAll('demo-a', 'demo-b'), bootstrapPolicy), false);
+assert.equal(allowed(documents.recovery, 'eks:AssociateAccessPolicy', bootstrapEntry, bootstrapPolicy), false);
+assert.equal(allowed(documents.provision, 'eks:AssociateAccessPolicy', bootstrapEntry, bootstrapPolicy), false);
 assert.equal(allowed(documents.deploy, 'eks:UpdateClusterConfig', cluster, closed), false);
 assert.equal(allowed(documents.provision, 'eks:UpdateClusterConfig', cluster, {}), false);
 assert.equal(allowed(documents.provision, 'eks:UpdateClusterConfig', cluster, { ...closed, 'eks:endpointPublicAccess': 'true' }), false);

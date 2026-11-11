@@ -34,7 +34,7 @@ resource "aws_eks_access_entry" "administrator" {
   cluster_name      = aws_eks_cluster.environment.name
   principal_arn     = var.eks_admin_role_arn
   type              = "STANDARD"
-  kubernetes_groups = ["oficina:${var.environment_id}:bootstrap"]
+  kubernetes_groups = ["oficina:${var.environment_id}:bootstrap", "oficina:${var.environment_id}:executor"]
 }
 
 resource "aws_eks_access_policy_association" "administrator" {

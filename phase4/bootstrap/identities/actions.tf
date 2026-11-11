@@ -16,8 +16,11 @@ locals {
     Resource = "arn:aws:s3:::${var.backend_bucket}/${local.state_prefix}/operations/inventory.json"
   }]
   endpoint_clients = [{
-    Sid      = "InvokeSelectedEndpointBrokerAndRecovery", Effect = "Allow", Action = ["lambda:InvokeFunction"]
+    Sid      = "InvokeSelectedEndpointBrokerAndRecovery", Effect = "Allow", Action = ["lambda:InvokeFunction", "lambda:GetFunctionConfiguration"]
     Resource = [for name in ["broker", "recovery"] : "arn:aws:lambda:${local.region}:${local.account}:function:${local.prefix}-endpoint-${name}"]
+    }, {
+    Sid      = "InspectIndependentRecoverySchedule", Effect = "Allow", Action = "scheduler:GetSchedule"
+    Resource = "arn:aws:scheduler:${local.region}:${local.account}:schedule/${local.prefix}-recovery/reconcile"
   }]
   action_bucket_evidence = [{
     Sid      = "BackendConfigurationEvidence", Effect = "Allow"

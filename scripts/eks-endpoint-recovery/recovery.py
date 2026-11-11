@@ -16,6 +16,7 @@ class Pending(RuntimeError):
 
 
 TERMINAL = {"CLOSED", "MISSING"}
+ADMIN_POLICY = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
 
 def require(condition, code):
@@ -108,7 +109,7 @@ class EndpointLease:
             raise Blocked("CIDR_REJECTED") from None
         require(300 <= record["expires_at"] - record["created_at"] <= 1800, "DURATION_REJECTED")
         require(record["created_at"] <= self.clock() + 5, "CREATION_REJECTED")
-        require(record["state"] in {"PREPARING", "ARMED", "DISPATCHING", "OPEN_REQUESTED", "CLOSING", *TERMINAL}, "STATE_REJECTED")
+        require(record["state"] in {"PREPARING", "ARMED", "DISPATCHING", "ELEVATING", "OPEN_REQUESTED", "CLOSING", *TERMINAL}, "STATE_REJECTED")
         require(isinstance(record["version"], int) and record["version"] > 0, "VERSION_REJECTED")
 
     def current(self, record):
@@ -218,6 +219,56 @@ class EndpointLease:
         self.store.change(record, state="OPEN_REQUESTED", update_id=update["id"])
         return {"lease_id": lease_id, "state": "OPEN_REQUESTED"}
 
+    def bootstrap_policies(self):
+        principal = f"arn:aws:iam::{self.config['account']}:role/{self.config['cluster_name']}-provision"
+        require(self.config.get('bootstrap_principal_arn') == principal, 'BOOTSTRAP_PRINCIPAL_REJECTED')
+        policies = []
+        token = None
+        while True:
+            arguments = dict(clusterName=self.config['cluster_name'], principalArn=principal)
+            if token:
+                arguments['nextToken'] = token
+            response = self.eks.list_associated_access_policies(**arguments)
+            policies.extend(response['associatedAccessPolicies'])
+            token = response.get('nextToken')
+            if not token:
+                return principal, policies
+
+    def bootstrap(self, lease_id):
+        self.identity()
+        require(self.config['enabled'] and self.config['recovery_verified'], 'OPENING_DISABLED')
+        record = self.store.get(lease_id)
+        require(record is not None, 'LEASE_NOT_FOUND')
+        self.validate(record)
+        self.current(record)
+        require(record['state'] == 'OPEN_REQUESTED' and record['expires_at'] - self.clock() >= 120,
+                'BOOTSTRAP_LEASE_NOT_OPEN')
+        self.verify_schedule(record['schedule_id'], self.expression(record), {'lease_id': lease_id})
+        self.verify_schedule('reconcile', self.reconcile_expression(), {'reconcile': True})
+        cluster = self.cluster()
+        network = cluster['resourcesVpcConfig']
+        require(cluster['status'] == 'ACTIVE' and network['endpointPrivateAccess']
+                and network['endpointPublicAccess'] and network['publicAccessCidrs'] == [record['cidr']],
+                'BOOTSTRAP_ENDPOINT_NOT_OPEN')
+        principal, policies = self.bootstrap_policies()
+        require(not policies, 'UNEXPECTED_BOOTSTRAP_ACCESS_POLICY')
+        record = self.store.change(record, state='ELEVATING', bootstrap_elevation=True,
+                                   dispatch_until=int(self.clock()) + 120)
+        self.eks.associate_access_policy(clusterName=self.config['cluster_name'], principalArn=principal,
+                                         policyArn=ADMIN_POLICY, accessScope={'type': 'cluster'})
+        self.store.change(record, state='OPEN_REQUESTED')
+        return {'lease_id': lease_id, 'bootstrap_elevation': True}
+
+    def revoke_bootstrap(self, record):
+        if not record.get('bootstrap_elevation'):
+            return
+        principal, policies = self.bootstrap_policies()
+        if any(policy['policyArn'] == ADMIN_POLICY for policy in policies):
+            self.eks.disassociate_access_policy(clusterName=self.config['cluster_name'], principalArn=principal,
+                                                policyArn=ADMIN_POLICY)
+            raise Pending('BOOTSTRAP_REVOCATION_PENDING')
+        require(not policies, 'UNEXPECTED_BOOTSTRAP_ACCESS_POLICY')
+
     def close(self, lease_id):
         self.identity()
         record = self.store.get(lease_id)
@@ -237,6 +288,13 @@ class EndpointLease:
                 self.store.change(record, state="MISSING", verified_at=int(self.clock()))
                 return {"state": "MISSING"}
             raise
+        revocation_error = None
+        try:
+            self.revoke_bootstrap(record)
+        except Exception as error:
+            revocation_error = error
+            print(json.dumps(dict(operation='bootstrap-revocation', state='PENDING' if isinstance(error, Pending) else 'FAILED',
+                                  code=str(error) if isinstance(error, (Blocked, Pending)) else error_code(error))))
         if cluster["status"] != "ACTIVE":
             raise Pending("CLUSTER_UPDATE_IN_PROGRESS")
         if record.get("update_id"):
@@ -256,10 +314,14 @@ class EndpointLease:
             cluster = self.cluster()
             if cluster["status"] != "ACTIVE":
                 raise Pending("CLUSTER_UPDATE_IN_PROGRESS")
+            if record.get('dispatch_uncertain'):
+                require(not cluster['resourcesVpcConfig']['endpointPublicAccess']
+                        and cluster['resourcesVpcConfig']['endpointPrivateAccess'], 'CLOSE_UPDATE_NOT_PRIVATE')
+                record = self.store.change(record, dispatch_uncertain=False)
         network = cluster["resourcesVpcConfig"]
-        if not network["endpointPublicAccess"] and network["endpointPrivateAccess"]:
-            if record.get("dispatch_uncertain"):
-                raise Pending("AMBIGUOUS_DISPATCH_REQUIRES_OPERATOR_REVIEW")
+        if not network["endpointPublicAccess"] and network["endpointPrivateAccess"] and not record.get('dispatch_uncertain'):
+            if revocation_error:
+                raise revocation_error
             self.store.change(record, state="CLOSED", verified_at=int(self.clock()))
             return {"state": "CLOSED"}
         update = self.eks.update_cluster_config(name=record["cluster_name"],
@@ -341,6 +403,8 @@ def broker_handler(event, context):
     service = runtime(context, broker=True)
     if set(event) == {"prepare"}:
         return service.prepare(event["prepare"])
+    if set(event) == {"bootstrap"}:
+        return service.bootstrap(event['bootstrap'])
     require(set(event) == {"open"}, "EVENT_REJECTED")
     return service.open(event["open"])
 

@@ -92,6 +92,8 @@ resource "aws_iam_role_policy" "recovery" {
   name = "close-selected-endpoint"
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Sid = "ObserveSelectedCluster", Effect = "Allow", Action = ["eks:DescribeCluster", "eks:DescribeUpdate", "eks:ListUpdates"], Resource = local.cluster },
+    { Sid = "ObserveBootstrapAccess", Effect = "Allow", Action = "eks:ListAssociatedAccessPolicies", Resource = "arn:aws:eks:${local.region}:${local.account}:access-entry/${local.prefix}/role/${local.account}/${local.prefix}-provision/*" },
+    { Sid = "RevokeTemporaryBootstrap", Effect = "Allow", Action = "eks:DisassociateAccessPolicy", Resource = "arn:aws:eks:${local.region}:${local.account}:access-entry/${local.prefix}/role/${local.account}/${local.prefix}-provision/*", Condition = { ArnEquals = { "eks:principalArn" = "arn:aws:iam::${local.account}:role/${local.prefix}-provision", "eks:policyArn" = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" } } },
     {
       Sid       = "CloseOnly", Effect = "Allow", Action = "eks:UpdateClusterConfig", Resource = local.cluster
       Condition = { Bool = { "eks:endpointPublicAccess" = "false", "eks:endpointPrivateAccess" = "true" } }

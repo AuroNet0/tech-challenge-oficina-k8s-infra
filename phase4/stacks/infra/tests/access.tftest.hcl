@@ -27,13 +27,10 @@ run "executor_entries_without_permanent_admin" {
   }
 }
 
-run "explicit_bootstrap_elevation" {
+run "reject_persistent_bootstrap_elevation" {
   command = plan
   variables { cluster_bootstrap_access_enabled = true }
-  assert {
-    condition     = length(aws_eks_access_policy_association.administrator) == 1 && aws_eks_access_policy_association.administrator[0].principal_arn == var.automation_roles.provision
-    error_message = "Elevacao deve ser explicita e somente para provision."
-  }
+  expect_failures = [var.cluster_bootstrap_access_enabled]
 }
 
 run "reject_foreign_executor" {

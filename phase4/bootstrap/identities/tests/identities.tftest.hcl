@@ -36,7 +36,7 @@ run "persistent_oidc_and_no_opening" {
     error_message = "PassRole deve ser exato e destroy deve negar sem inventario aprovado."
   }
   assert {
-    condition     = jsondecode(output.policy_documents.recovery).Statement[1].Condition.Bool["eks:endpointPublicAccess"] == "false" && jsondecode(output.policy_documents.recovery).Statement[1].Resource == "arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a"
+    condition     = alltrue([for statement in jsondecode(output.policy_documents.recovery).Statement : statement.Condition.Bool["eks:endpointPublicAccess"] == "false" && statement.Resource == "arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a" if statement.Sid == "CloseOnly"])
     error_message = "Recuperacao deve somente fechar cluster selecionado."
   }
 }

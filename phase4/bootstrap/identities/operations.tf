@@ -20,7 +20,6 @@ locals {
     { Sid = "NeverOpenClusterDirectly", Effect = "Deny", Action = ["eks:CreateCluster", "eks:UpdateClusterConfig"], Resource = "*", Condition = { Bool = { "eks:endpointPublicAccess" = "true" } } },
     { Sid = "NeverDisablePrivateEndpoint", Effect = "Deny", Action = ["eks:CreateCluster", "eks:UpdateClusterConfig"], Resource = "*", Condition = { Bool = { "eks:endpointPrivateAccess" = "false" } } },
     { Sid = "UpdateEksComponents", Effect = "Allow", Action = ["eks:UpdateAddon", "eks:UpdateNodegroupConfig", "eks:UpdateNodegroupVersion", "eks:UpdatePodIdentityAssociation", "eks:TagResource"], Resource = local.eks_arns },
-    { Sid = "TemporaryBootstrapElevation", Effect = "Allow", Action = ["eks:AssociateAccessPolicy", "eks:DisassociateAccessPolicy"], Resource = "arn:aws:eks:${local.region}:${local.account}:access-entry/${local.prefix}/*", Condition = { ArnEquals = { "eks:principalArn" = "arn:aws:iam::${local.account}:role/${local.prefix}-provision", "eks:policyArn" = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" } } },
     { Sid = "UpdateLambdaRelease", Effect = "Allow", Action = ["lambda:UpdateFunctionConfiguration", "lambda:UpdateFunctionCode", "lambda:AddPermission", "lambda:RemovePermission", "lambda:PutFunctionConcurrency"], Resource = local.lambda_arns },
     { Sid = "RdsEncryptionKeyMetadata", Effect = "Allow", Action = "kms:DescribeKey", Resource = "*", Condition = { StringEquals = { "aws:RequestedRegion" = local.region } } }
   ]

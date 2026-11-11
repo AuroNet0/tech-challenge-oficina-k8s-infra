@@ -225,6 +225,8 @@ def up_phase(driver, phase):
         raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
     platform = driver.outputs('platform')
     with driver.kubernetes():
+        if phase in ('foundation', 'controller', 'observability'):
+            driver.bootstrap_permissions()
         if phase == 'foundation':
             foundation(driver, platform)
         elif phase == 'controller':
