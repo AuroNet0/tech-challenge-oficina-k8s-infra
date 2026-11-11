@@ -1,0 +1,189 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Phase or checkpoint to review and execute
+        type: choice
+        required: true
+        default: infra
+        options:
+          - infra
+          - release
+          - platform
+          - foundation
+          - controller
+          - secrets
+          - data
+          - platform-migration
+          - migrate
+          - edge
+          - edge-auth
+          - jwks
+          - platform-apps
+          - apps
+          - edge-alb
+          - ingress
+          - alb-check
+          - edge-business
+          - observability
+          - health
+          - e2e
+          - diagnose
+          - recovery-closed
+          - recovery-expiry
+          - iam-maintenance
+          - artifact-foundation
+          - recovery-foundation
+          - recovery-activate
+      plan_run:
+        description: Successful Plan run ID at this same homolog commit
+        required: true
+        type: string
+      approved_plan_sha256:
+        description: SHA256 published by Plan
+        required: true
+        type: string
+      retry_failed_jobs:
+        description: Retry failed owned Jobs only after collecting diagnostics
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read
+env:
+  SOURCE_AUTH_REVISION: ${{ vars.SOURCE_AUTH_REVISION }}
+  SOURCE_AUTH_CHECKS: ${{ vars.SOURCE_AUTH_CHECKS }}
+  SOURCE_OS_REVISION: ${{ vars.SOURCE_OS_REVISION }}
+  SOURCE_OS_CHECKS: ${{ vars.SOURCE_OS_CHECKS }}
+  SOURCE_EXECUTION_REVISION: ${{ vars.SOURCE_EXECUTION_REVISION }}
+  SOURCE_EXECUTION_CHECKS: ${{ vars.SOURCE_EXECUTION_CHECKS }}
+  SOURCE_BILLING_REVISION: ${{ vars.SOURCE_BILLING_REVISION }}
+  SOURCE_BILLING_CHECKS: ${{ vars.SOURCE_BILLING_CHECKS }}
+  NETWORK_PROBE_IMAGE: ${{ vars.NETWORK_PROBE_IMAGE }}
+  MONGODB_IMAGE: ${{ vars.MONGODB_IMAGE }}
+  RABBITMQ_IMAGE: ${{ vars.RABBITMQ_IMAGE }}
+  POSTGRES_IMAGE: ${{ vars.POSTGRES_IMAGE }}
+  EKS_VPC_CNI_VERSION: ${{ vars.EKS_VPC_CNI_VERSION }}
+  EKS_EBS_CSI_VERSION: ${{ vars.EKS_EBS_CSI_VERSION }}
+  EKS_POD_IDENTITY_VERSION: ${{ vars.EKS_POD_IDENTITY_VERSION }}
+  ALB_CERTIFICATE_ARN: ${{ vars.ALB_CERTIFICATE_ARN }}
+  ALB_SERVER_NAME: ${{ vars.ALB_SERVER_NAME }}
+  MERCADO_PAGO_TEST_SECRET_ARN: ${{ vars.MERCADO_PAGO_TEST_SECRET_ARN }}
+  NEW_RELIC_SECRET_ARN: ${{ vars.NEW_RELIC_SECRET_ARN }}
+  RECOVERY_ALARM_TOPIC_ARN: ${{ vars.RECOVERY_ALARM_TOPIC_ARN }}
+  SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+jobs:
+  deploy:
+    environment: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'phase4-demo-a-bootstrap' || contains(fromJSON('["release","secrets","data","migrate","apps","health","jwks","alb-check","e2e"]'), inputs.phase) && 'phase4-demo-a-deploy' || 'phase4-demo-a-provision' }}
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'bootstrap' || contains(fromJSON('["release","secrets","data","migrate","apps","health","jwks","alb-check","e2e"]'), inputs.phase) && 'deploy' || 'provision' }}
+      PROTECTED_ENVIRONMENT: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'phase4-demo-a-bootstrap' || contains(fromJSON('["release","secrets","data","migrate","apps","health","jwks","alb-check","e2e"]'), inputs.phase) && 'phase4-demo-a-deploy' || 'phase4-demo-a-provision' }}
+      OPERATION: deploy
+      PLAN_ARTIFACT_KEY: ${{ secrets.PLAN_ARTIFACT_KEY }}
+      PLAN_RUN: ${{ inputs.plan_run }}
+      PLAN_HASH: ${{ inputs.approved_plan_sha256 }}
+      RETRY_FAILED_JOBS: ${{ inputs.retry_failed_jobs }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REGION: us-east-1
+      REPORT_DIR: actions-report/execution
+      PHASE: ${{ inputs.phase || 'infra' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Validate protected environment and inputs
+        id: gate
+        run: python scripts/environment-actions/pipeline.py gate --phase "$PHASE" --plan-run "$PLAN_RUN" --hash "$PLAN_HASH"
+      - name: Locate successful Plan attempt
+        id: reference
+        run: |
+          python -c 'import os; import sys; sys.path.insert(0, "scripts/environment-actions"); from pipeline import gh_json, REPOSITORY; run=gh_json([f"repos/{REPOSITORY}/actions/runs/" + os.environ["PLAN_RUN"]]); open(os.environ["GITHUB_OUTPUT"], "a").write("attempt=" + str(run["run_attempt"]) + "\n")'
+      - uses: actions/download-artifact@v4
+        with:
+          name: approved-plan-${{ inputs.plan_run }}-${{ steps.reference.outputs.attempt }}
+          run-id: ${{ inputs.plan_run }}
+          github-token: ${{ github.token }}
+          path: approved-plan
+      - uses: aws-actions/configure-aws-credentials@v4
+        id: aws
+        with:
+          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-${{ env.EXECUTOR_ROLE }}
+          role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          allowed-account-ids: '446517826146'
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Validate source revisions
+        id: sources
+        if: inputs.phase == 'release'
+        run: |
+          python scripts/environment-actions/source_outputs.py
+      - uses: actions/checkout@v4
+        if: inputs.phase == 'release'
+        with:
+          repository: AuroNet0/tech-challenge-oficina-auth
+          ref: ${{ steps.sources.outputs.auth }}
+          path: sources/auth
+          persist-credentials: false
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        if: inputs.phase == 'release'
+        with:
+          repository: AuroNet0/tech-challenge-oficina-os-service
+          ref: ${{ steps.sources.outputs.os }}
+          path: sources/os
+          persist-credentials: false
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        if: inputs.phase == 'release'
+        with:
+          repository: AuroNet0/tech-challenge-oficina-execution-service
+          ref: ${{ steps.sources.outputs.execution }}
+          path: sources/execution
+          persist-credentials: false
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        if: inputs.phase == 'release'
+        with:
+          repository: AuroNet0/tech-challenge-oficina-billing-service
+          ref: ${{ steps.sources.outputs.billing }}
+          path: sources/billing
+          persist-credentials: false
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+      - name: Package recovery verification code
+        run: python scripts/environment-actions/package_recovery.py
+      - name: Execute approved phase
+        id: execute
+        run: python scripts/environment-actions/pipeline.py deploy --phase "$PHASE" --plan-run "$PLAN_RUN" --hash "$PLAN_HASH"
+      - name: Independently verify endpoint closure
+        if: ${{ always() && steps.aws.outcome == 'success' && !contains(fromJSON('["iam-maintenance","artifact-foundation","recovery-foundation","recovery-activate"]'), inputs.phase) }}
+        env:
+          REPORT_DIR: actions-report/endpoint-close
+        run: python scripts/environment-actions/pipeline.py close --phase "$PHASE"
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: deploy
+        run: python scripts/environment-actions/finalize.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: deploy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          if-no-files-found: error
+          retention-days: 7

@@ -43,7 +43,12 @@ export function aws(service, operation, parameters = [], execute = spawnSync) {
   const result = execute('aws', [service, operation, ...parameters, '--region', 'us-east-1', '--output', 'json',
     '--no-cli-pager', '--cli-connect-timeout', '5', '--cli-read-timeout', '15'],
   { encoding: 'utf8', timeout: 45000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, AWS_MAX_ATTEMPTS: '2' } });
-  if (result.status !== 0 || result.error) throw new Error(result.error?.code === 'ENOENT' ? 'AWS_CLI_UNAVAILABLE' : errorCode(result.stderr));
+  if (result.status !== 0 || result.error) {
+    const failure = new Error(result.error?.code === 'ENOENT' ? 'AWS_CLI_UNAVAILABLE' : errorCode(result.stderr));
+    const resourceIndex = parameters.findIndex(value => ['--bucket', '--role-name', '--name', '--function-name', '--db-instance-identifier'].includes(value));
+    failure.aws_call = { service, operation, resource: resourceIndex >= 0 ? parameters[resourceIndex + 1] : 'account/region' };
+    throw failure;
+  }
   try { return JSON.parse(result.stdout || '{}'); } catch { throw new Error('INVALID_JSON'); }
 }
 
@@ -58,7 +63,7 @@ class AwsInspectionError extends Error {
 export class Report {
   constructor(operation, directory = process.env.REPORT_DIR || 'actions-report') {
     this.directory = directory;
-    this.data = { schema_version: 1, operation, environment: 'demo-a',
+    this.data = { schema_version: 1, operation, environment: 'demo-a', account: '446517826146', region: 'us-east-1',
       run_id: process.env.GITHUB_RUN_ID || 'offline', attempt: process.env.GITHUB_RUN_ATTEMPT || '1',
       revision: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') ? process.env.GITHUB_SHA : 'offline', checks: [], environment_ready: false };
   }
@@ -87,6 +92,7 @@ export class Report {
         failure = { aws_call: error.call, required_permissions: error.permissions };
         console.error(`AWS inspection failed: ${error.call.service} ${error.call.operation} (${reason})`);
       }
+      if (error.aws_call) failure = { aws_call: error.aws_call, required_permissions: [] };
     }
     this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next, ...failure });
     this.write();
@@ -375,7 +381,9 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     const instances = call('ec2', 'describe-instances', ['--filters', 'Name=instance-state-name,Values=pending,running,stopping,stopped']).Reservations.flatMap(item => item.Instances);
     const usage = instances.filter(instance => /^[acdhimrtz]/.test(instance.InstanceType) && instance.InstanceLifecycle !== 'spot')
       .reduce((total, instance) => total + instance.CpuOptions.CoreCount * instance.CpuOptions.ThreadsPerCore, 0);
-    verify(Number.isFinite(usage) && quota - usage >= 2 * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
+    const existing = instances.filter(instance => instance.InstanceType === config.instance_type
+      && instance.Tags?.some(tag => tag.Key === 'EnvironmentId' && tag.Value === 'demo-a')).length;
+    verify(Number.isFinite(usage) && quota - usage >= Math.max(0, 2 - existing) * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
   }, 'Offerings and quotas cannot guarantee live EC2 capacity. Review usage and regional restrictions.');
   await report.check('inventory', 'previous resources and conflicts', () => {
     verify(typeof catalog.backend_bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket), 'BACKEND_NOT_CONFIGURED');

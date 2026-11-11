@@ -12,7 +12,8 @@ def secret_context(driver):
     infra = driver.outputs('infra')['platform_contract']
     platform = driver.outputs('platform')
     import os
-    scope = contracts.Scope.resolve(catalog, 'demo-a', ACCOUNT, REGION, ACCOUNT, REGION, os.environ['GITHUB_SHA'])
+    scope = contracts.Scope.resolve(catalog, 'demo-a', ACCOUNT, REGION, ACCOUNT, REGION, os.environ['GITHUB_SHA'],
+                                    approval_source=getattr(driver, 'authorization_source', 'catalog'))
     plan = contracts.Plan.build(scope, infra, platform['secret_contract'], payment_enabled=True)
 
     class DurableStore(transports.SecretsManagerStore):

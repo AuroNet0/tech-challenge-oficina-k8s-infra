@@ -76,3 +76,32 @@ run "reject_revision" {
 
   expect_failures = [var.git_revision]
 }
+
+run "github_environment_controls_demo_a_without_catalog_edits" {
+  command = plan
+
+  variables {
+    aws_account_id  = "446517826146"
+    approval_source = "github-environment"
+  }
+
+  assert {
+    condition     = output.contract.ready && !local.environment.enabled
+    error_message = "Actions deve delegar autorizacao ao Environment sem reescrever o catalogo."
+  }
+}
+
+run "github_environment_does_not_enable_demo_b" {
+  command = plan
+
+  variables {
+    environment_id  = "demo-b"
+    aws_account_id  = "446517826146"
+    approval_source = "github-environment"
+  }
+
+  assert {
+    condition     = !output.contract.ready
+    error_message = "A autorizacao de demo-a nao pode liberar demo-b."
+  }
+}

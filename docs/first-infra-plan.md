@@ -1,5 +1,9 @@
 # Primeiro Terraform Infra Plan — fluxo consolidado
 
+> Registro histórico. Os workflows e gates citados foram substituídos por Plan,
+> Deploy e Destroy. Para operar sem editar JSON por execução, consulte o guia
+> `docs/github-actions-first.md` na raiz do repositório.
+
 Este é o procedimento vigente para `homolog`. Nenhuma aprovação é preenchida
 pelo código; `demo-a` e o apply permanecem desabilitados. Operações AWS e Terraform
 conectado são executadas somente pelo GitHub Actions quando o operador as autorizar.

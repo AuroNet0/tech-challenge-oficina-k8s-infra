@@ -1,5 +1,9 @@
 # Inline policy de instalacao inicial — demo-a
 
+> Registro histórico. Os workflows e gates citados foram substituídos por Plan,
+> Deploy e Destroy. Para operar sem editar JSON por execução, consulte o guia
+> `docs/github-actions-first.md` na raiz do repositório.
+
 No Console AWS: **IAM → Roles → tc-oficina-p4-demo-a-bootstrap → Add permissions → Create inline policy → JSON**.
 Cole integralmente `demo-a-bootstrap-install-policy.json`. Nome recomendado:
 **`tc-oficina-p4-demo-a-bootstrap-install`**. Nao e uma trust policy nem uma permissions boundary.

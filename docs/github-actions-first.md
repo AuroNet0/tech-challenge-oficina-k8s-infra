@@ -1,194 +1,179 @@
-# Actions-first: operação de demo-a
+# CI/CD de demo-a: Plan → Deploy → Destroy
 
-Os executores reais estão em `scripts/environment-actions/`. Todas as operações
-conectadas pertencem aos workflows; não executar o runtime, apply ou destroy local.
-Esta revisão mantém catálogos, execução e configuração **desabilitados**.
+Esta é a documentação operacional vigente. Há somente três workflows acionáveis,
+todos por `workflow_dispatch` em `homolog`. Os documentos de bootstrap/preflight
+anteriores são históricos. Nenhum comando conectado deve ser executado localmente.
 
-## Uso e retomada
+## Operação mínima
 
-`Environment Up` é dispatch por **fase**, não uma promessa de deploy completo em
-um clique. Cada fase pode ser repetida na mesma revisão. Os planos Terraform
-publicam `plan.json` com endereços/ações/hash; sem hash não fazem apply. Revisar o
-plano e repetir a mesma fase/revisão com `approved_plan_sha256`, sob aprovação do
-environment. O apply usa o arquivo de plano recém-calculado, somente se seu hash
-coincidir. Replacements/deletes são rejeitados no Up.
+1. **Plan**: escolher `infra`, branch `homolog`. Revisar `summary.md`,
+   `plan.json` e o SHA256 publicado no resumo do run. Não precisa habilitar o
+   catálogo, publicar aplicações ou fornecer Mercado Pago/New Relic.
+2. **Deploy**: mesma fase e mesmo commit de `homolog`; informar `plan_run`
+   (ID numérico do Plan) e `approved_plan_sha256`. O revisor aprova o
+   GitHub Environment deste novo run depois de revisar mudanças e custos.
+3. **Destroy**: branch `homolog`, confirmação exata `DESTROY demo-a`.
+   Aprovar os Environments correspondentes ao teardown e à destruição.
 
-Ordem operacional:
+Cada fase necessária é um checkpoint retomável dentro dos mesmos workflows.
+Deploy aplica **o binário Terraform produzido pelo Plan**, sem recalcular outro
+plano. Confere procedência do run, fase, commit, conta, região, backend,
+configuração, inventário e versões S3 dos states. Mudança nesses contratos exige
+novo Plan; o executor nunca aceita outro plano em lugar do aprovado.
+O Terraform também verifica lineage/serial e lock ao aplicar o plano salvo.
 
-1. `infra` plan/apply; `release` compila/testa/publica quatro imagens, JAR e layer.
-2. `platform` plan/apply; `edge` plan/apply da fundação; repetir `platform` para
-   identidade do controller após observar SG/certificado da Edge.
-3. `foundation` instala manifests/RBAC/addons, verifica dois nodes e prova
-   NetworkPolicy com conexões permitida e negada; `controller` instala Helm/Pod Identity.
-4. `secrets` entrega PKI/credenciais usando os adaptadores existentes; `data`
-   instala Mongo/Rabbit, espera readiness e executa PostgreSQL bootstrap.
-5. `platform-migration` plan/apply; `migrate` executa Job Auth e remove projeções
-   temporárias somente após sucesso. `edge-auth` plan/apply; `jwks` valida HTTP/JWKS.
-6. `platform-apps` plan/apply; `apps` aplica quatro Deployments e verifica probes;
-   `edge-alb` plan/apply; `ingress` instala Ingress e valida listener/targets;
-   `edge-business` plan/apply; `observability`; `health`; `e2e`.
+## Configuração única no GitHub
 
-Cada fase Terraform exige sua própria revisão de plano. Receipts são de execução
-real, vinculados à revisão e válidos por duas horas. Readiness de Terraform é
-derivada desses receipts, não de flags livres. Após mudança de revisão, repetir
-as verificações/entregas necessárias. PASS de uma fase **não** significa ambiente
-completo; `environment_ready` permanece falso enquanto a aceitação final faltar.
+- Secret de repositório `PLAN_ARTIFACT_KEY`: chave aleatória de 32 bytes em
+  base64, igual para Plan e Deploy. Pode ser gerada fora dos logs de Actions com
+  `openssl rand -base64 32`. O binário pode conter dados sensíveis: artifact
+  contém somente resumo sem valores e payload cifrado/autenticado com AES-GCM.
+  Trocar a chave invalida os planos pendentes. Artifacts expiram em sete dias.
+- Os Environments existentes `phase4-demo-a-provision`,
+  `phase4-demo-a-deploy` e `phase4-demo-a-destroy` precisam de revisores
+  obrigatórios e restrição à branch `homolog`. O executor verifica a presença
+  dos revisores na API do GitHub e falha se a proteção estiver ausente.
+- `phase4-demo-a-bootstrap` é usado somente nas fases opcionais de manutenção
+  ou verificação independente. Também exige revisores para executar mudanças.
+- O token do run precisa conseguir ler metadados dos Environments. Os workflows
+  solicitam `contents: read`, `actions: read` e `id-token: write`.
+  `SOURCE_READ_TOKEN` é necessário apenas quando os repositórios dos serviços
+  não podem ser lidos com o token padrão.
+- Runners privados já existentes podem ser selecionados por
+  `PHASE4_EXECUTOR_RUNNER_LABELS`. Não se provisiona runner automaticamente.
 
-O builder existente continua offline por padrão; o adaptador Actions opta
-explicitamente por resolução Maven/Docker online, preservando os scanners/testes
-e executando builds sem credenciais AWS no ambiente dos subprocessos de build.
-Não modifica os quatro workflows CI dos serviços.
+O OIDC **immutable** instalado vincula as roles a esses Environments. Por isso
+Plan utiliza o Environment provision existente para autenticar: se ele já exige
+aprovação, essa proteção continua valendo. Remover essa aprovação apenas de Plan
+exigiria uma mudança explícita do contrato OIDC; esta refatoração não a executa.
+Destroy mantém duas identidades: provision para RBAC/Kubernetes e destroy para
+AWS. As duas aprovações correspondem a permissões diferentes impostas pelas
+trusts existentes, não a novas flags de autorização.
 
-## Destroy antes do primeiro Up
+Não há `PHASE4_PLAN_APPROVED`, `PHASE4_READONLY_APPROVED` ou
+`PHASE4_EXECUTION_APPROVED` nos workflows. Não se atualizam timestamps ou
+`preflight_authorization`. As funções legadas continuam disponíveis para
+compatibilidade/testes, mas não são o executor operacional.
+A seleção técnica Terraform `approval_source=github-environment` delega a
+autorização ao executor protegido. Os defaults locais continuam usando o
+catálogo bloqueado; demo-b continua isolado e bloqueado. Não se altera o tipo do
+plano da conta AWS nem se habilita automaticamente um serviço opcional.
 
-`Environment Destroy`, confirmação `DESTROY demo-a`, não depende do preflight de
-criação nem de Up bem-sucedido. Usa dois jobs aprovados: provision faz teardown
-Kubernetes privilegiado; destroy remove os states. Ambos compartilham com Up e
-bootstrap o lock `phase4-demo-a-mutation`, sem cancelar execução em andamento.
+## Configuração técnica das fases seguintes
 
-O teardown relê os states, bloqueia APIs inventariadas, remove Ingress e espera
-ALB desaparecer com controller ativo, remove workloads/PVCs, registra IDs dos
-volumes via PV e espera sua exclusão antes de Helm/CSI. Remove somente namespaces,
-releases e recursos globais com identidade/ownership esperado. Depois: Edge,
-Platform, imagens ECR, versões S3/layers e secrets próprios, Infra por último.
-O inventário de retomada fica no backend versionado em
-`phase4/environments/demo-a/operations/inventory.json`; tfvars públicos são salvos
-antes de apply, inclusive quando a execução é interrompida. State/inventário não
-são apagados. Bucket backend, bucket de artifacts vazio, OIDC e identidades persistem.
-Signing/entradas externas não pertencem ao executor de secrets e são preservados.
+Os contratos estáveis permanecem versionados em `phase4/environments/`.
+É possível fornecer os campos técnicos abaixo por **variables de repositório**,
+sem editar JSON por execução. Plan e Deploy devem receber os mesmos valores.
 
-Falha interrompe as fases destrutivas dependentes; repetir o workflow após corrigir
-a causa. State ausente com inventário não vazio e AccessDenied nunca significam
-limpeza concluída. Verifica resíduos EKS/RDS/ALB/EBS/ENI; custos ficam explicitamente
-`UNVERIFIED_BILLING_LAG`. Não existe destroy automático ao falhar Up.
+| Fase | Variables técnicas |
+|---|---|
+| release | `SOURCE_AUTH_REVISION`, `SOURCE_OS_REVISION`, `SOURCE_EXECUTION_REVISION`, `SOURCE_BILLING_REVISION`: SHAs completos; respectivos `SOURCE_*_CHECKS`: nomes dos checks CI separados por vírgula |
+| platform | `MONGODB_IMAGE`, `RABBITMQ_IMAGE`, `POSTGRES_IMAGE`: referências por digest; `EKS_VPC_CNI_VERSION`, `EKS_EBS_CSI_VERSION`, `EKS_POD_IDENTITY_VERSION`: versões exatas compatíveis |
+| foundation | `NETWORK_PROBE_IMAGE`: imagem Python por digest para a prova positiva/negativa de NetworkPolicy |
+| secrets | `MERCADO_PAGO_TEST_SECRET_ARN`: ARN da credencial TEST já armazenada no Secrets Manager |
+| edge-alb e seguintes | `ALB_CERTIFICATE_ARN` e `ALB_SERVER_NAME`: certificado ACM e SAN controlado |
+| observability | `NEW_RELIC_SECRET_ARN`: ARN do secret de ingestão já existente |
+| recovery-foundation | `RECOVERY_ALARM_TOPIC_ARN`: tópico SNS independente já autorizado |
 
-## EKS: resultado da avaliação
+As variáveis contêm referências técnicas; valores secretos continuam no GitHub
+Secrets ou Secrets Manager. Pins e verificações CI dos quatro serviços são
+validados antes da publicação. Inputs ausentes produzem erro objetivo antes
+da autenticação ou da operação dependente. Infra não depende desses campos.
 
-O cliente de broker está conectado: IP público observado, lease de até 1800s,
-prepare antes de open, CIDR /32 conferido, fechamento no finally e verificação
-independente por DescribeCluster. Um passo `always()` adicional tenta recuperar
-o fechamento sem substituir o relatório original. Expiração/scheduler/recuperador
-existentes independem da vida do runner; perda abrupta não depende de finally.
+Ordem dos checkpoints de aplicação, conforme os componentes existentes:
 
-**O caminho público temporário continua desabilitado nesta revisão.** O módulo
-instala `enabled=false/recovery_verified=false` por padrão. Sua ativação agora tem
-workflow e flags de bootstrap explícitas, mas não há canário AWS real executado.
-O marcador local `independent_canary_verified` sozinho não habilita o broker:
-seu runtime também exige verificação recente em DynamoDB, versão de código,
-cluster/createdAt, agenda, identidade e probe do recuperador.
-Não alterar a configuração Lambda pelo Console para contornar esse bloqueio.
+1. `infra`; `release`; `platform`; `edge`; repetir `platform` para a identidade ALB.
+2. `foundation`; `controller`; `secrets`; `data`.
+3. `platform-migration`; `migrate`; `edge-auth`; `jwks`.
+4. `platform-apps`; `apps`; `edge-alb`; `ingress`; `edge-business`.
+5. `observability`; `health`; `diagnose` quando necessário.
 
-Sequência sem runner/EC2 adicional:
+Cada checkpoint possui Plan e Deploy próprios. Nas fases sem Terraform, Plan
+valida dependências e publica a autorização cifrada do checkpoint; não instala
+manifests ou publica imagens. Os receipts reais mantêm revisão e validade de duas
+horas. Não se marca readiness global como comprovada sem a aceitação completa.
 
-1. Bootstrap Identities instala o módulo existente com
-   `recovery_installation_approved=true`, `recovery_package_path=endpoint-recovery.zip`,
-   `recovery_alarm_topic_arn` real e ambos os flags de abertura/verificação falsos.
-   O ZIP é montado deterministicamente no próprio workflow, a partir da revisão.
-2. Up `infra`: o preflight permite **somente controle AWS**, com acesso Kubernetes
-   marcado DEFERRED, e exige endpoint privado se cluster já existir. Plano revisado
-   pode criar o primeiro cluster fechado sem presumir canário de cluster inexistente.
-3. `Environment Verify Recovery`, modo `closed-canary`: faz somente atualização
-   privada, espera o **scheduler independente** concluir CANARY, verifica código,
-   cluster, atualização e quatro alarmes OK, então registra VERIFICATION com validade
-   máxima de 24 horas. O recuperador não tem permissão de escrever VERIFICATION.
-4. Novo plano aprovado do bootstrap com `recovery_opening_approved=true` e
-   `recovery_verification_approved=true` instala permissão de abertura **somente no
-   broker**. As roles GitHub continuam explicitamente impedidas de abrir diretamente.
-5. Verify Recovery, modo `lease-expiry`: abre /32 por 300 segundos com agenda já
-   armada, **não chama close pelo runner**, observa abertura e espera a recuperação
-   registrar CLOSED após expiração. Se cancelado, a agenda continua. O artifact
-   indica se a transição público→privado foi comprovada; falha não gera prova.
-6. Só após essa evidência aprovada marcar `independent_canary_verified=true` no
-   contrato operacional. Preflight completo invoca probe somente leitura e bloqueia
-   prova vencida, código diferente ou cluster recriado. Repetir canário quando expirar.
+## Manutenção e recovery opcionais
 
-A role bootstrap precisa, além da instalação revisada dos recursos do módulo,
-de Invoke/GetFunctionConfiguration nas duas funções, GetSchedule na agenda exata,
-DescribeCluster/DescribeUpdate no cluster, DescribeAlarms nos quatro alarmes,
-GetItem na tabela `tc-oficina-p4-demo-a-endpoint-leases` e PutItem **somente** com
-`dynamodb:LeadingKeys=["VERIFICATION"]`. Revisar PassRole para as roles Lambda/
-Scheduler exatas, restrito ao serviço destinatário. O canal SNS de alarmes já
-deve existir e ser acompanhado pelo operador. Nada disso foi aplicado nesta etapa.
+O bootstrap IAM já concluído não é repetido como dependência. Quando necessário,
+selecionar no próprio Plan/Deploy uma fase de manutenção, sob role bootstrap:
 
-Alternativa mínima suportada: **runner privado já existente**, sem criar EC2 ou
-self-hosted novo. Configurar `endpoint.mode=existing-private`, `runner_mode` e
-`private_probe_host` no contrato, além das variáveis JSON de labels
-`PHASE4_EXECUTOR_RUNNER_LABELS` e `PHASE4_PREFLIGHT_RUNNER_LABELS`. O runtime exige
-self-hosted, endpoint somente privado e `/readyz` alcançável. Sem executor existente
-comprovado ou broker operacional, o preflight bloqueia Up. A conta não tem cluster
-para comprovar canário agora; sua execução autorizada continua pendente na AWS.
+- `iam-maintenance`: reutiliza inputs, boundaries, validação e revisão de escopo
+  do bootstrap existente, com o state persistente já instalado. Reconstrói o
+  inventário dos states de demo-a sem gravá-los durante Plan e prepara as
+  permissões exatas de provision/deploy/destroy para revisão no Environment.
+  O checkpoint Terraform preserva esse inventário nas manutenções seguintes;
+  isso não executa nem substitui a confirmação obrigatória de Destroy.
+- `artifact-foundation`: cria/valida o bucket versionado de artifacts somente
+  após aprovação do seu plano.
+- `recovery-foundation`: instala os mecanismos independentes já implementados,
+  mantendo abertura desabilitada inicialmente.
+- `recovery-closed`: executa o canário real de fechamento e registra evidência
+  no DynamoDB; não fabrica prova a partir de uma aprovação humana.
+- `recovery-activate`: só planeja/ativa abertura depois de um probe real válido.
+- `recovery-expiry`: prova fechamento independente da lease /32 de 300 segundos.
 
-## Bootstrap mínimo e configuração
+Recursos opcionais já presentes no state bootstrap são preservados nas fases
+seguintes; não se desabilitam buckets/recovery por flags default falsas.
+O state `phase4/bootstrap/identities/demo-a.tfstate` nunca é confundido com
+os states efêmeros. Bootstrap, OIDC, boundaries, bucket de backend e mecanismos
+independentes persistentes ficam fora do Destroy normal.
 
-1. Administrador não root, com sessão temporária/MFA, usa Console IAM para criar
-   ou reutilizar provider `https://token.actions.githubusercontent.com`, audience
-   `sts.amazonaws.com`. Nunca usar root keys em Actions.
-2. Criar role `tc-oficina-p4-demo-a-bootstrap` com trust OIDC **somente** para o
-   environment `phase4-demo-a-bootstrap`. Confirmar subject real: clássico
-   `repo:AuroNet0/tech-challenge-oficina-k8s-infra:environment:phase4-demo-a-bootstrap`
-   ou immutable do contrato existente; não assumir IDs/customizações sem verificar.
-3. Reutilizar/criar backend S3 em us-east-1, privado, versionado e criptografado.
-   Role bootstrap recebe Get/Put no state bootstrap e Get/Put/Delete no `.tflock`,
-   ListBucket restrito ao prefixo e GetBucketLocation. IAM limitado às roles/policies
-   `tc-oficina-p4-demo-a-*`: ações explícitas de Get/List/Create/Tag/Update de roles,
-   policies/versions e attachments, sem AdministratorAccess. Revisar conteúdo das
-   policies, pois prefixo de ARN não limita privilégios que uma policy concede.
-4. Preparar `phase4/bootstrap/identities/approved-inputs.json`: conta/região,
-   `environment_id`, `backend_bucket`, `installation_approved`, `oidc_claims_verified`,
-   `subject_format` e cinco JSON strings em `workload_boundary_documents`, conforme
-   `boundaries.tf`. Arquivo ainda ausente de propósito. Não aplicar a root legada.
-5. Bootstrap Identities: plan-only, revisão de `identity-plan.json`, nova execução
-   com hash e aprovação. Pode criar o bucket de artifacts persistente do contrato
-   com `artifact_bucket_installation_approved=true` explicitamente revisado;
-   nesse caso a role bootstrap também precisa das ações S3 de criação/configuração
-   **somente** em `tc-oficina-p4-demo-a-artifacts`. Bucket existente deve ser reutilizado
-   com a flag falsa; não tentar recriá-lo ou importar pelo terminal local.
-6. A cada fase, revisar `identity-inventory.json` e instalar pelo mesmo workflow
-   as permissões exatas ainda dependentes de inventário (incluindo master secret RDS,
-   deleções e APIs). Preencher `inventory`, `inventory_approved`, `destroy_confirmation`
-   e `external_input_secrets` apenas com ARNs observados. Campo approved do artifact
-   é falso: não há concessão IAM automática a partir de tags. Desabilitar a identidade
-   bootstrap entre manutenções. Terraform bootstrap rejeita deletes/replacements.
+Essas fases dependem de permissões específicas da role bootstrap. A policy
+mínima instalada originalmente pode não autorizar Lambda, DynamoDB, Scheduler
+ou leitura dos três states e do inventário para manutenção IAM. AccessDenied deve ser corrigido no escopo exato
+reportado pelo plano, pelo responsável IAM; não se amplia IAM automaticamente.
+A autorização humana de custos não é apresentada como prova de elegibilidade
+AWS. Plan inspeciona conta FREE ativa, versões, ofertas AZ e quotas; não garante
+capacidade EC2 futura nem permissões efetivas de todas as criações.
 
-Environments `phase4-demo-a-{bootstrap,provision,deploy,destroy}`: reviewer operador,
-impedir autoaprovação, branch `homolog`; verificar suporte no plano GitHub.
-`PHASE4_BOOTSTRAP_APPROVED`, `PHASE4_READONLY_APPROVED`, `PHASE4_EXECUTION_APPROVED`
-começam falsos. Não configurados remotamente nesta revisão. Provision precisa da
-elevação bootstrap EKS existente para foundation/Helm/teardown; revogar após a janela
-e reautorizar por plano aprovado antes de teardown quando necessário.
+## Destruição e falhas
 
-Preencher `demo-a.runtime.json` com inputs públicos reais das três roots, revisões
-dos quatro serviços e nomes exatos de checks CI obrigatórios, digest da imagem Python
-de probe, ARNs de entrada Mercado Pago **teste** e licença New Relic. Credenciais
-externas ficam em `/oficina/phase4/demo-a/inputs/{mercado-pago,newrelic}` no Secrets
-Manager, autorizadas pelos ARNs exatos no bootstrap. `SOURCE_READ_TOKEN` é opcional
-para checkouts privados (somente leitura); nenhuma AWS key no GitHub. Aprovar CA RDS
-em `rds-ca-policy.json`. A revisão datada de acesso aos serviços FREE/backend em
-`preflight_authorization` é atestação humana, não prova de capacidade física AWS.
+Teardown recupera o inventário a partir dos states, remove ingress antes de
+workloads/PVCs e mantém controller até remover recursos externos. Destroy usa
+os inputs persistidos e a ordem edge → platform → artifacts/secrets → infra.
+Confere ownership, conta, região e os states exatos; prefixo sozinho nunca
+autoriza remoção. States legados `terraform/` e `bootstrap/` não são alterados.
 
-## Diagnóstico, testes e pendências
+O job AWS continua elegível após falha do teardown, mas seu executor exige
+receipt de teardown correspondente à geração do cluster. A exceção segura é
+um cluster de infra parcial: nenhum state de platform/edge, nenhum inventário
+dessas stacks, nenhum ALB ou volume de dados. Assim um problema de acesso ao
+Kubernetes não bloqueia a recuperação de uma infra ainda sem aplicações.
+Caso existam aplicações/recursos externos, bloqueia com diagnóstico e preserva
+o inventário para uma retomada autorizada.
 
-Resumo/JSON por fase, duração, recurso/endereço Terraform, operação do provider,
-código AWS/RequestId quando disponível e próxima ação. Collector Kubernetes registra
-status/probes/exit codes/event reasons e assinaturas conhecidas de logs limitados;
-descarta mensagens arbitrárias, env, tokens e conteúdo privado. State, plano binário,
-tfvars completos e payloads de Secrets não viram artifacts. Upload `always()`;
-cancelamento forçado/checkout falho pode impedir upload. Inventário backend mantém
-retomada. Erro do coletor/checkpoint/fechamento não oculta o erro original.
+Todos os jobs coletam diagnósticos e publicam artifacts com `if: always()`.
+Falhas de checkpoint, diagnóstico ou fechamento não substituem a causa original.
+Os relatórios consolidados registram fase, operação, revisão, conta/região,
+etapa, código, recurso, correção, resultado Terraform e fechamento/recovery.
+Os detalhes Terraform são sanitizados; valores de secrets, planos em claro,
+kubeconfigs e tokens não são publicados.
 
-Testes offline cobrem gates, hashes, falhas parciais, interrupção, fechamento,
-retomada, ownership, sanitização e ordem de teardown. São testes com clientes falsos;
-não comprovam IAM efetivo, disponibilidade/capacidade, conectividade ou fechamento AWS.
-Validação desta revisão: 28 testes do executor, 40 de recuperação, 20 checks Node
-do executor, 20 testes do builder, 23 checks IAM e 18 checks de artefatos aprovados;
-Terraform fmt, validate das quatro roots com backend desativado, 13 testes mock
-de identidades e nove do módulo de recuperação aprovados; seis YAMLs parseados.
-O módulo foi testado em cópia temporária com o lock Windows já validado do bootstrap,
-pois seu lock local não incluía o checksum desse pacote/plataforma. Sem downloads.
-O harness Billing 9.1.4 ainda usa Docker/provider mock: a fase `e2e` falha com
-`AWS_E2E_ADAPTER_REQUIRED`. Login/atores/signing e pagamento sandbox também precisam
-de preparação autorizada e aceitação real; não há relato fictício de E2E concluído.
+## Migração e validação
 
-Próximo passo: revisar Destroy e IAM/inventário, resolver o caminho EKS e completar
-a aceitação AWS/E2E antes de autorizar o primeiro ambiente. Não habilitar demo-a
-apenas porque os testes offline passaram.
+| Workflow removido | Função reaproveitada internamente |
+|---|---|
+| environment-preflight | inspeção read-only em control.mjs dentro de Plan |
+| environment-up | Driver, fases de delivery, publicação, receipts, checkpoints e endpoint closure |
+| environment-destroy | teardown provision + destroy com role própria e verificação residual |
+| environment-bootstrap-identities | validateInputs/reviewPlan e root persistente nas fases de manutenção |
+| environment-verify-recovery | verify_recovery.verify nas fases opcionais de recovery |
+| ci-cd | substituído pelos três contratos; wrapper legado já estava desativado |
+| destroy-infra | teardown/state/ownership da Fase 4; root legado preservado sem execução |
+| debug-new-relic | observability e diagnose com coleta sanitizada e ownership de demo-a |
+
+Testes locais disponíveis: Node (`node --test scripts/environment-actions/*.test.mjs
+scripts/identity-contracts/contracts.test.mjs`), Python (`bash
+scripts/environment-actions/offline.sh`), contratos PowerShell e Terraform
+offline (`bash scripts/environment-actions/offline-terraform.sh <tools>`).
+O diretório de ferramentas precisa conter `bin/terraform` e o mirror local
+`corrected-data/providers`; o runner usa backend desabilitado, sem credenciais.
+Para os testes Java/PKI, fornecer Java 21 no PATH e o contrato exportado em
+`PLATFORM_PUBLIC_CONTRACT`. Os mocks Terraform existentes verificam contratos,
+não atestam capacidade, credenciais ou funcionamento AWS.
+
+Bloqueio real preservado: a fase `e2e` não tem adapter AWS do Billing/Mercado
+Pago no projeto atual. Ela falha com `AWS_E2E_ADAPTER_REQUIRED` já no gate.
+Também não se afirma que roles, bucket, quotas, versão disponível, recovery ou
+readiness foram verificados na AWS durante esta refatoração offline.

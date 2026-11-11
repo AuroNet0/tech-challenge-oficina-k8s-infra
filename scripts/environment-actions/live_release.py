@@ -6,7 +6,7 @@ import re
 import urllib.request
 from contextlib import contextmanager
 
-from runtime import ACCOUNT, PREFIX, REGION, ROOT, Failure, canonical, digest, module_at, require
+from runtime import ACCOUNT, PREFIX, REGION, ROOT, Failure, canonical, cleanup_steps, digest, module_at, require
 
 
 @contextmanager
@@ -32,10 +32,14 @@ def recovered_jar(driver, reference):
         driver.run([*docker, 'pull', reference])
         container = driver.run([*docker, 'create', reference]).strip()
         require(re.fullmatch(r'[0-9a-f]{64}', container), 'CONTAINER_ID_REJECTED')
+        original_error = None
         try:
             driver.run([*docker, 'cp', container + ':/app/app.jar', str(destination)])
+        except BaseException as error:
+            original_error = error
+            raise
         finally:
-            driver.run([*docker, 'rm', container])
+            cleanup_steps(driver.report, [('build-container', lambda: driver.run([*docker, 'rm', container]))], original_error)
     module_at('release_jar_contract', 'scripts/artifact-release', 'release.py').verify_jar(destination)
     return destination
 

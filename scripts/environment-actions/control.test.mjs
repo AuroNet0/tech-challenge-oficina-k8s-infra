@@ -176,8 +176,8 @@ test('failed pods trigger bounded current and previous log collection without le
   });
 });
 
-test('Up and Destroy share a lock and never cancel the running operation', () => {
-  for (const name of ['environment-up.yml', 'environment-destroy.yml', 'environment-bootstrap-identities.yml', 'environment-verify-recovery.yml']) {
+test('Plan, Deploy and Destroy share a lock and never cancel the running operation', () => {
+  for (const name of ['plan.yml', 'deploy.yml', 'destroy.yml']) {
     const workflow = fs.readFileSync(path.join(root, '.github/workflows', name), 'utf8');
     assert.match(workflow, /group: phase4-demo-a-mutation/);
     assert.match(workflow, /cancel-in-progress: false/);
@@ -187,9 +187,13 @@ test('Up and Destroy share a lock and never cancel the running operation', () =>
   }
 });
 
-test('legacy has no auth, Terraform, AWS or destructive commands', () => {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci-cd.yml'), 'utf8');
-  assert.doesNotMatch(workflow, /terraform\s+(apply|destroy|plan)|id-token:|configure-aws|kubectl|helm/);
+test('only the three operational workflows remain actionable', () => {
+  const workflows = fs.readdirSync(path.join(root, '.github/workflows')).filter(name => /\.ya?ml$/.test(name)).sort();
+  assert.deepEqual(workflows, ['deploy.yml', 'destroy.yml', 'plan.yml']);
+  for (const name of workflows) {
+    const workflow = fs.readFileSync(path.join(root, '.github/workflows', name), 'utf8');
+    assert.doesNotMatch(workflow, /PHASE4_(PLAN|READONLY|EXECUTION)_APPROVED|workflow_call:|uses: \.\/\.github\/workflows\//);
+  }
 });
 
 test('planning gate authorizes only infra planning without enabling apply', () => {
@@ -210,17 +214,20 @@ test('planning gate authorizes only infra planning without enabling apply', () =
   assert.equal(runtime.approved, false);
 });
 
-test('workflow contracts preserve reusable defaults and propagate explicit planning intent', () => {
-  const preflight = fs.readFileSync(path.join(root, '.github/workflows/environment-preflight.yml'), 'utf8');
-  assert.match(preflight, /workflow_dispatch:[\s\S]*?scope:[\s\S]*?default: infra[\s\S]*?- infra[\s\S]*?- full/);
-  assert.match(preflight, /workflow_call:[\s\S]*?scope:[\s\S]*?default: full/);
-  assert.match(preflight, /intent:[\s\S]*?default: apply/);
-  assert.ok(preflight.includes("PREFLIGHT_INTENT: ${{ inputs.intent || 'inspect' }}"));
-  const up = fs.readFileSync(path.join(root, '.github/workflows/environment-up.yml'), 'utf8');
-  assert.match(up, /execution_mode:[\s\S]*?default: plan/);
-  assert.ok(up.includes('intent: ${{ inputs.execution_mode }}'));
-  assert.ok(up.includes("--execution-mode '${{ inputs.execution_mode }}'"));
-  assert.ok(up.includes("steps.aws.outcome == 'success' && inputs.execution_mode == 'apply'"));
+test('Plan only plans; Deploy consumes a saved artifact and Destroy retains both least-privilege roles', () => {
+  const plan = fs.readFileSync(path.join(root, '.github/workflows/plan.yml'), 'utf8');
+  assert.ok(plan.includes('PREFLIGHT_INTENT: inspect'));
+  assert.ok(plan.includes('PREFLIGHT_SCOPE: infra'));
+  assert.ok(plan.includes('pipeline.py plan'));
+  assert.doesNotMatch(plan, /pipeline\.py (deploy|destroy|teardown|close)|terraform apply|confirmation:/);
+  const deploy = fs.readFileSync(path.join(root, '.github/workflows/deploy.yml'), 'utf8');
+  assert.ok(deploy.includes('actions/download-artifact@v4'));
+  assert.ok(deploy.includes('PROTECTED_ENVIRONMENT:'));
+  assert.ok(deploy.includes('--hash "$PLAN_HASH"'));
+  const destroy = fs.readFileSync(path.join(root, '.github/workflows/destroy.yml'), 'utf8');
+  assert.ok(destroy.includes('DESTROY demo-a'));
+  assert.ok(destroy.includes("always() && needs.teardown.result != 'cancelled'"));
+  for (const role of ['provision', 'destroy']) assert.ok(destroy.includes(`EXECUTOR_ROLE: ${role}`));
 });
 
 test('bootstrap requires approved boundaries and excludes secret-bearing input variables', () => {

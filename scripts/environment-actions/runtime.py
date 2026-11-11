@@ -40,6 +40,18 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 
 
+def cleanup_steps(report, actions, original_error=None):
+    failure = None
+    for resource, action in actions:
+        try:
+            with report.phase('cleanup', resource):
+                action()
+        except Exception as error:
+            failure = failure or error
+    if failure is not None and original_error is None:
+        raise failure
+
+
 def digest(value):
     return hashlib.sha256(value).hexdigest()
 
@@ -71,12 +83,27 @@ def safe_error(text):
     return next((code for code, pattern in patterns.items() if re.search(pattern, text, re.I)), 'COMMAND_FAILED')
 
 
+def safe_diagnostic(text):
+    for name, value in os.environ.items():
+        if re.search(r'secret|token|password|credential|private_key|access_key|authorization|artifact_key', name, re.I) and len(value) >= 4:
+            text = text.replace(value, '[REDACTED]')
+    text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)', '[REDACTED]', text)
+    text = re.sub(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b', '[REDACTED]', text)
+    text = re.sub(r'(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
+    text = re.sub(r'(https?://[^\s?"\'<>]+)\?[^\s"\'<>]*', r'\1?[REDACTED]', text)
+    text = re.sub(r'(?i)(authorization\s*[:=]\s*)(?:Bearer|Basic)\s+[^\s,;]+', r'\1[REDACTED]', text)
+    text = re.sub(r'''(?ix)(["']?\b[\w.-]*(?:password|passwd|secret|token|credential|private_key|access_key|authorization|jwt)[\w.-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)''', r'\1[REDACTED]', text)
+    text = re.sub(r'^.*\b(?:\d+\s*:\s|[+~-]\s+[\w".-]+\s*=).*$', '[source values withheld]', text, flags=re.M)
+    return text[:16384]
+
+
 class Report:
     def __init__(self, operation, directory=None):
         self.directory = Path(directory or os.getenv('REPORT_DIR', 'actions-report'))
         self.directory.mkdir(parents=True, exist_ok=True)
         self.data = dict(operation=operation, environment='demo-a', run_id=os.getenv('GITHUB_RUN_ID'),
-                         revision=os.getenv('GITHUB_SHA'), checks=[], result='RUNNING', environment_ready=False)
+                         revision=os.getenv('GITHUB_SHA'), account=ACCOUNT, region=REGION,
+                         checks=[], result='RUNNING', environment_ready=False)
 
     @contextlib.contextmanager
     def phase(self, phase, resource):
@@ -94,6 +121,8 @@ class Report:
             if isinstance(error, Failure):
                 entry['detail'] = error.detail
                 entry['failed_resource'] = error.resource
+                if error.resource:
+                    entry['resource'] = error.resource
             entry['next_action'] = 'Inspect this phase and its resource; correct the reported cause and rerun. Backend and inventory are preserved.'
             raise
         finally:
@@ -109,6 +138,14 @@ class Report:
                 '| Phase | Resource | Status | Reason | ms |', '|---|---|---|---|---:|']
         rows += [f"| {entry['phase']} | {entry['resource']} | {entry['status']} | {entry['reason']} | {entry['duration_ms']} |"
                  for entry in self.data['checks']]
+        rows += ['', f"Account: {ACCOUNT}; region: {REGION}; operation: {self.data['operation']}; phase: {self.data.get('phase', 'n/a')}",
+                 f"Terraform: {self.data.get('terraform_result', 'See checks')}"]
+        if self.data.get('plan_sha256'):
+            rows += ['', 'Approved plan SHA256: `' + self.data['plan_sha256'] + '`']
+        for entry in self.data['checks']:
+            if entry['status'] == 'FAIL':
+                rows += ['', 'Failed step: ' + entry['phase'], 'Action: ' + entry.get('next_action', ''),
+                         'Diagnostic: `' + json.dumps(entry.get('detail', {}), sort_keys=True) + '`']
         (self.directory / 'summary.md').write_text('\n'.join(rows) + '\n', encoding='utf-8')
 
     def finish(self):
@@ -200,8 +237,10 @@ class Driver:
             return getattr(self.client(service), operation)(**arguments)
         except Exception as error:
             metadata = getattr(error, 'response', {}).get('ResponseMetadata', {})
+            resource = next((str(arguments[key]) for key in ('ResourceArn', 'RoleName', 'Bucket', 'SecretId', 'name', 'Key') if key in arguments), service)
             raise Failure(code_of(error), f'{service}:{operation}', dict(request_id=metadata.get('RequestId'),
-                http_status=metadata.get('HTTPStatusCode'))) from None
+                http_status=metadata.get('HTTPStatusCode'), aws_action=service + ':' + operation,
+                resource=resource)) from None
 
     def items(self, service, operation, result, **arguments):
         client = self.client(service)
@@ -222,20 +261,40 @@ class Driver:
         stdout = result.stdout.decode(errors='replace') if isinstance(result.stdout, bytes) else result.stdout or ''
         stderr = result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr or ''
         if result.returncode:
-            context = {}
+            context = dict(exit_code=result.returncode)
             if arguments[0] == 'terraform':
                 diagnostics = []
+                records = []
+                try:
+                    document = json.loads(stdout)
+                    if isinstance(document, dict):
+                        records.extend(document.get('diagnostics', []))
+                except ValueError:
+                    pass
                 for line in stdout.splitlines():
                     try:
                         diagnostic = json.loads(line).get('diagnostic', {})
                     except ValueError:
                         continue
+                    if diagnostic:
+                        records.append(diagnostic)
+                if not records:
+                    records.append(dict(summary='Terraform command failed', detail=stdout + stderr, raw_output_withheld=True))
+                for diagnostic in records:
                     address = diagnostic.get('address')
-                    if address and re.fullmatch(r'[a-zA-Z0-9_.\[\]"/-]+', address):
+                    if diagnostic and (not address or re.fullmatch(r'[a-zA-Z0-9_.\[\]"/-]+', address)):
                         text = diagnostic.get('summary', '') + diagnostic.get('detail', '')
                         operation = re.search(r'operation error ([A-Za-z0-9]+): ([A-Za-z0-9]+)', text)
+                        aws_code = re.search(r'\b(AccessDenied(?:Exception)?|UnauthorizedOperation|InvalidParameter\w*|NoSuch\w+|\w*NotFound\w*|\w*LimitExceeded\w*)\b', text)
+                        denied_action = re.search(r'(?:perform:|action:)\s*([A-Za-z0-9-]+:[A-Za-z0-9]+)', text)
+                        affected = re.search(r'arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:[A-Za-z0-9_./:-]+', text)
                         diagnostics.append(dict(resource=address, cause=safe_error(text),
-                            provider_operation=operation.group(0) if operation else None))
+                            summary=safe_diagnostic(diagnostic.get('summary', '')),
+                            detail='' if diagnostic.get('raw_output_withheld') else safe_diagnostic(diagnostic.get('detail', '')),
+                            provider_operation=operation.group(0) if operation else None,
+                            aws_code=aws_code.group(0) if aws_code else None,
+                            required_action=denied_action.group(1) if denied_action else None,
+                            affected_resource=affected.group(0) if affected else None))
                 context['diagnostics'] = diagnostics
             raise Failure(safe_error(stdout + stderr), arguments[0], context)
         return stdout
@@ -258,6 +317,9 @@ class Driver:
     def save(self):
         self.api('s3', 'put_object', Bucket=self.bucket, Key=self.key, Body=canonical(self.journal),
                  ExpectedBucketOwner=ACCOUNT, ServerSideEncryption='AES256', ContentType='application/json')
+        (self.report.directory / 'identity-inventory.json').write_bytes(canonical(dict(inventory=self.identity_inventory(), inventory_approved=False)))
+
+    def identity_inventory(self):
         inventory = {key: [] for key in ['ec2', 'eks_children', 'api_resources', 'rds', 'ecr', 'lambda', 'log_groups', 'workload_roles']}
         inventory.update(secrets=self.journal['secrets'], workload_boundaries={})
         for resources in self.journal['resources'].values():
@@ -278,7 +340,7 @@ class Driver:
             inventory['workload_boundaries'].update(values.get('workload_permissions_boundaries', {}))
         if self.journal.get('rds_master_secret_arn'):
             inventory['rds_master_secret_arn'] = self.journal['rds_master_secret_arn']
-        (self.report.directory / 'identity-inventory.json').write_bytes(canonical(dict(inventory=inventory, inventory_approved=False)))
+        return inventory
 
     def receipt(self, name, value):
         self.journal['receipts'][name] = dict(revision=os.environ['GITHUB_SHA'], observed_at=int(time.time()), **value)
@@ -300,7 +362,7 @@ class Driver:
         self.init(stack)
         return {key: value['value'] for key, value in json.loads(self.tf(stack, ['output', '-json'])).items()}
 
-    def snapshot(self, stack):
+    def snapshot(self, stack, persist=True):
         document = json.loads(self.tf(stack, ['show', '-json']))
         resources = []
 
@@ -335,7 +397,8 @@ class Driver:
 
         visit(document.get('values', {}).get('root_module', {}))
         self.journal['resources'][stack] = resources
-        self.save()
+        if persist:
+            self.save()
         return resources
 
     def variables(self, stack, profile=None):

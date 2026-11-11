@@ -14,10 +14,11 @@ validada na AWS. Os ambientes do catálogo estão bloqueados para operação.
 - [Integração Auth/Platform e validação local — Etapa 9.2.3.2](docs/9.2.3.2-integracao-platform.md)
 - [Secrets, PKI e preparação de migrações — Etapa 9.2.3.3](docs/9.2.3.3-secrets-pki.md)
 
-O workflow legado `ci-cd.yml` aceita somente `workflow_dispatch`; os gatilhos
-automáticos foram removidos. Ele contém `apply` da infraestrutura legada e não
-deve ser utilizado para a Fase 4. Não usar as instruções locais legadas abaixo
-para esta preparação; seguir somente as verificações sem backend da documentação.
+A operação atual utiliza somente [Plan](.github/workflows/plan.yml),
+[Deploy](.github/workflows/deploy.yml) e [Destroy](.github/workflows/destroy.yml).
+Seguir o [guia operacional](docs/github-actions-first.md): plano salvo e cifrado,
+aprovação própria de Deploy/Destroy e diagnósticos em falhas. Os contratos
+legados descritos nas seções seguintes não são executados pelos workflows.
 
 Propósito:
 Repositório responsável pelo provisionamento da infraestrutura Kubernetes da aplicação Tech Challenge Oficina usando Terraform e AWS.
@@ -319,37 +320,16 @@ Access entries do EKS:
 
 ## CI/CD
 
-O workflow final esta em `.github/workflows/ci-cd.yml`.
+Os workflows operacionais são `plan.yml`, `deploy.yml` e `destroy.yml`,
+acionados manualmente em `homolog`. Plan inspeciona e salva o plano; Deploy
+valida run, hash, commit e states antes de aplicar o binário aprovado sob
+GitHub Environment; Destroy exige `DESTROY demo-a`, ownership e aprovação.
 
-Triggers:
-
-- `pull_request` para `homolog` e `main`;
-- `push` para `homolog` e `main`;
-- `workflow_dispatch`.
-
-Job `Terraform CI`:
-
-- checkout do repositorio;
-- setup do Terraform;
-- `terraform fmt -check`;
-- `terraform init -input=false -backend=false`;
-- `terraform validate`.
-
-Job `Terraform deploy`:
-
-- executa apenas em `push` ou `workflow_dispatch` nas branches `homolog` e `main`;
-- usa ambiente `homolog` para branch `homolog`;
-- usa ambiente `production` para branch `main`;
-- assume a role configurada em `AWS_DEPLOY_ROLE_ARN` via AWS OIDC;
-- executa `terraform init`;
-- executa `terraform plan` e `terraform apply`;
-- quando New Relic esta habilitado, primeiro garante a infraestrutura base sem New Relic caso o cluster ainda nao exista;
-- configura `kubectl` para o EKS;
-- valida a presenca de `NEW_RELIC_API_KEY`;
-- cria/atualiza o namespace `newrelic` e o secret `newrelic-license` com `NEW_RELIC_LICENSE_KEY`;
-- aguarda os nodes ficarem `Ready`;
-- valida o daemonset `aws-node`;
-- executa `terraform plan` e `terraform apply` com as variaveis do New Relic.
+O [guia operacional](docs/github-actions-first.md) descreve a configuração única,
+os checkpoints, manutenção IAM/recovery opcional, testes e limitações reais.
+Não é necessário habilitar o catálogo nem editar timestamps em JSON para Plan.
+Os workflows antigos foram removidos após migração dos executores e testes.
+As roots legadas permanecem preservadas e fora das três operações.
 
 ## Estrategia de branches
 
@@ -409,9 +389,9 @@ Requisitos para execucao local:
 
 ## Seguranca
 
-Workflow legado disponível somente por `workflow_dispatch`, com provisionamento
-legado preservado para futura adaptação. Não executar para a Fase 4. A inspeção e
-os limites da proteção estão no [relatório dos ajustes finais](docs/9.2.2-A-ajustes-finais.md).
+A operação demo-a é limitada à branch `homolog`, roles OIDC immutable já
+instaladas e GitHub Environments protegidos. Nenhuma autorização é inferida do
+nome de um recurso ou de uma aprovação anterior de Plan.
 - Secrets e chaves ficam fora do codigo fonte.
 - Deploys no GitHub Actions usam AWS OIDC, sem credenciais AWS estaticas.
 - RDS PostgreSQL fica em subnets privadas, provisionado pelo repositorio de banco.
