@@ -21,6 +21,9 @@ plano. Confere procedência do run, fase, commit, conta, região, backend,
 configuração, inventário e versões S3 dos states. Mudança nesses contratos exige
 novo Plan; o executor nunca aceita outro plano em lugar do aprovado.
 O Terraform também verifica lineage/serial e lock ao aplicar o plano salvo.
+Antes de aplicar Platform ou Edge, Deploy revalida a revisão e a validade de
+duas horas dos receipts usados no plano. Uma aprovação demorada não renova
+evidências de readiness vencidas nem autoriza outro plano.
 
 ## Configuração única no GitHub
 
@@ -149,6 +152,10 @@ Os relatórios consolidados registram fase, operação, revisão, conta/região,
 etapa, código, recurso, correção, resultado Terraform e fechamento/recovery.
 Os detalhes Terraform são sanitizados; valores de secrets, planos em claro,
 kubeconfigs e tokens não são publicados.
+Relatórios incompletos são registrados como falha de diagnóstico sem impedir
+o resumo dos demais relatórios. Destroy registra o resultado Terraform por
+stack e tenta verificar recursos remanescentes também depois de uma falha,
+preservando a causa original quando essa verificação adicional falhar.
 
 ## Migração e validação
 

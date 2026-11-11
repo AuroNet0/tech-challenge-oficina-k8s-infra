@@ -671,15 +671,21 @@ class Driver:
         require(stack in self.journal['stacks'], 'RECOVERY_INPUTS_REQUIRED', stack)
         inputs = Path(self.temporary.name) / (stack + '-destroy.json')
         inputs.write_bytes(canonical(self.journal['stacks'][stack]))
+        results = self.report.data.setdefault('terraform_stacks', {})
+        results[stack] = 'DESTROY_RUNNING'
         try:
             self.tf(stack, ['destroy', '-json', '-input=false', '-auto-approve', '-lock-timeout=60s', f'-var-file={inputs}'])
         except BaseException:
+            results[stack] = 'DESTROY_FAILED'
+            self.report.data['terraform_result'] = 'FAILED'
             try:
                 with self.report.phase('checkpoint-after-failed-destroy', stack):
                     self.snapshot(stack)
             except Exception:
                 pass
             raise
+        results[stack] = 'DESTROYED'
+        self.report.data['terraform_result'] = 'DESTROYED_OWNED_STACKS'
         self.snapshot(stack)
 
     def destroy(self):

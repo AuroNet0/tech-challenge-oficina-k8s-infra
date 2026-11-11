@@ -8,10 +8,22 @@ def finalize(directory, steps, job_status, operation, phase, revision):
     directory.mkdir(parents=True, exist_ok=True)
     checks = []
     terraform = 'NOT_RUN'
+    terraform_stacks = {}
     plan_hash = None
     for path in sorted(directory.glob('*/report.json')):
-        report = json.loads(path.read_text(encoding='utf-8'))
+        try:
+            report = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(report, dict) or not isinstance(report.get('checks', []), list):
+                raise ValueError('Invalid report schema')
+            if not all(isinstance(entry, dict) for entry in report.get('checks', [])):
+                raise ValueError('Invalid check schema')
+        except (OSError, ValueError):
+            checks.append(dict(phase='diagnostic-collection', resource=str(path.relative_to(directory)),
+                               status='FAIL', reason='DIAGNOSTIC_REPORT_UNREADABLE',
+                               next_action='Inspect the producing step log; retain the original failure and other reports.'))
+            continue
         checks.extend(dict(entry, report=path.parent.name) for entry in report.get('checks', []))
+        terraform_stacks.update(report.get('terraform_stacks', {}))
         if report.get('terraform_result', 'NOT_RUN') != 'NOT_RUN':
             terraform = report['terraform_result']
         plan_hash = report.get('plan_sha256') or plan_hash
@@ -26,12 +38,16 @@ def finalize(directory, steps, job_status, operation, phase, revision):
     failures = [check for check in checks if check.get('status') == 'FAIL']
     primary = next((check for check in failures if check.get('phase') != 'cleanup'
                     and not check.get('phase', '').startswith(('endpoint-close', 'checkpoint-'))
+                    and check.get('phase') not in ('diagnostic-collection', 'residual-verification-after-failure')
                     and check.get('reason') != 'GITHUB_STEP_FAILED'), failures[0] if failures else None)
     report = dict(operation=operation, phase=phase, revision=revision, account='446517826146', region='us-east-1',
-                  result=result, terraform_result=terraform, plan_sha256=plan_hash, primary_failure=primary, checks=checks)
+                  result=result, terraform_result=terraform, terraform_stacks=terraform_stacks,
+                  plan_sha256=plan_hash, primary_failure=primary, checks=checks)
     (directory / 'report.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
     rows = [f'# {operation}: {result}', f'Phase: {phase}; commit: {revision}',
             'AWS account: 446517826146; region: us-east-1', f'Terraform: {terraform}', '']
+    for stack, outcome in terraform_stacks.items():
+        rows.append(f'Terraform {stack}: {outcome}')
     if plan_hash:
         rows += [f'Plan SHA256: `{plan_hash}`', '']
     if primary:

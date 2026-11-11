@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -138,6 +139,19 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(Failure, '^AccessDenied$'):
                 pipeline.deploy(self.driver, 'infra', '123', summary['sha256'], self.temporary.name)
 
+    def test_saved_plan_cannot_apply_expired_runtime_evidence(self):
+        self.driver.journal['receipts']['bootstrap'] = dict(verified=True, revision='a' * 40,
+                                                          observed_at=time.time())
+        self.driver.variables = lambda stack, phase: dict(environment_id='demo-a', bootstrap_completed=True)
+        pipeline.plan(self.driver, 'platform')
+        summary = json.loads((Path(self.temporary.name) / 'plan.json').read_text())
+        self.commands.clear()
+        with patch('pipeline.gh_json', return_value=self.run), patch('runtime.time.time', return_value=time.time() + 7201):
+            with self.assertRaisesRegex(Failure, 'EVIDENCE_STALE'):
+                pipeline.deploy(self.driver, 'platform', '123', summary['sha256'], self.temporary.name)
+        self.assertNotIn(('apply', 'platform'), self.commands)
+        self.assertFalse(any(command[0] == 'save' for command in self.commands))
+
     def test_state_keys_are_scoped_and_access_denied_never_means_empty(self):
         commands = []
         driver = Driver(self.config, self.report, catalog=self.catalog)
@@ -242,6 +256,44 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.report.data['checks'][0]['reason'], 'CLEANUP_FAILED')
         with self.assertRaisesRegex(Failure, 'CLEANUP_FAILED'):
             cleanup_steps(self.report, actions)
+
+    def test_unreadable_diagnostic_does_not_hide_original_failure_or_prevent_summary(self):
+        for name, contents in (
+                ('execution', json.dumps(dict(terraform_result='FAILED', terraform_stacks=dict(infra='DESTROY_FAILED'),
+                    checks=[dict(phase='destroy-infra', resource='terraform', status='FAIL', reason='AccessDenied')]))),
+                ('endpoint-close', '{incomplete'), ('preflight', '[]')):
+            path = Path(self.temporary.name) / name
+            path.mkdir()
+            (path / 'report.json').write_text(contents)
+        report, summary = finalize(self.temporary.name, {}, 'failure', 'destroy', 'infra', 'a' * 40)
+        self.assertEqual(report['primary_failure']['reason'], 'AccessDenied')
+        self.assertEqual(report['terraform_stacks'], dict(infra='DESTROY_FAILED'))
+        self.assertEqual(sum(check['reason'] == 'DIAGNOSTIC_REPORT_UNREADABLE' for check in report['checks']), 2)
+        self.assertIn('Terraform infra: DESTROY_FAILED', summary)
+        self.assertTrue((Path(self.temporary.name) / 'summary.md').is_file())
+
+    def test_destroy_failure_still_checks_residuals_and_preserves_original_cause(self):
+        driver = pipeline.PipelineDriver(self.config, self.report, catalog=self.catalog)
+        self.addCleanup(driver.temporary.cleanup)
+        with patch.object(driver, 'destroy_owned', side_effect=Failure('AccessDenied', 'terraform')):
+            with patch.object(driver, 'residuals', side_effect=Failure('RESIDUAL_EKS')) as residuals:
+                with self.assertRaisesRegex(Failure, '^AccessDenied$'):
+                    driver.destroy()
+                residuals.assert_called_once()
+        self.assertEqual(self.report.data['checks'][-1]['reason'], 'RESIDUAL_EKS')
+
+    def test_destroy_records_actual_terraform_result_for_each_stack(self):
+        self.driver.api = lambda *args, **kwargs: dict(ETag='owned-state')
+        self.driver.journal['stacks']['infra'] = dict(environment_id='demo-a')
+        self.driver.snapshot = lambda stack: [dict(type='aws_vpc', id='owned-vpc')]
+        self.driver.destroy_stack('infra')
+        self.assertEqual(self.report.data['terraform_result'], 'DESTROYED_OWNED_STACKS')
+        self.assertEqual(self.report.data['terraform_stacks']['infra'], 'DESTROYED')
+        self.driver.tf = lambda *args: (_ for _ in ()).throw(Failure('AccessDenied', 'terraform'))
+        with self.assertRaisesRegex(Failure, 'AccessDenied'):
+            self.driver.destroy_stack('infra')
+        self.assertEqual(self.report.data['terraform_result'], 'FAILED')
+        self.assertEqual(self.report.data['terraform_stacks']['infra'], 'DESTROY_FAILED')
 
     def test_pretty_validate_json_keeps_sanitized_original_cause(self):
         diagnostic = dict(severity='error', summary='Invalid configuration', detail='Provider contract failed password=synthetic-secret')

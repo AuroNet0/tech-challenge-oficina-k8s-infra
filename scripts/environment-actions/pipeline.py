@@ -237,6 +237,8 @@ def deploy(driver, phase, reference, approved_hash, directory):
                 or (stack == 'identities' and phase in MAINTENANCE_PHASES), 'STACK_REJECTED')
         binary = base64.b64decode(payload['binary'], validate=True)
         require(digest(binary) == manifest['binary_sha256'], 'APPROVED_PLAN_HASH_MISMATCH')
+        if stack in ('platform', 'edge'):
+            driver.verify_attestations(stack, payload['variables'])
         saved = Path(driver.temporary.name) / 'approved.tfplan'
         saved.write_bytes(binary)
         driver.init(stack)
@@ -281,6 +283,17 @@ class PipelineDriver(Driver):
             yield
 
     def destroy(self):
+        try:
+            self.destroy_owned()
+        except BaseException:
+            try:
+                with self.report.phase('residual-verification-after-failure', PREFIX):
+                    self.residuals()
+            except BaseException:
+                pass
+            raise
+
+    def destroy_owned(self):
         cluster = self.cluster(missing_ok=True)
         receipt = self.journal['receipts'].get('teardown', {})
         valid_teardown = cluster and receipt.get('verified') and receipt.get('cluster_created_at') == str(cluster['createdAt'])

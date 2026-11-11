@@ -20,7 +20,8 @@ class UniqueLoader(yaml.BaseLoader):
 
 class WorkflowTests(unittest.TestCase):
     def test_only_three_manual_workflows_and_every_job_publishes_diagnostics_after_failure(self):
-        files = sorted((ROOT / '.github/workflows').glob('*.yml'))
+        files = sorted(path for path in (ROOT / '.github/workflows').iterdir()
+                       if path.suffix in ('.yml', '.yaml'))
         self.assertEqual([path.name for path in files], ['deploy.yml', 'destroy.yml', 'plan.yml'])
         for path in files:
             document = yaml.load(path.read_text(), Loader=UniqueLoader)
