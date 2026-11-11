@@ -68,6 +68,9 @@ def verify(driver):
         lease = driver.invoke('broker', {'prepare': dict(github_run_id=os.environ['GITHUB_RUN_ID'],
             github_run_attempt=os.getenv('GITHUB_RUN_ATTEMPT', '1'), revision=os.environ['GITHUB_SHA'],
             observed_ip=address, duration_seconds=300)})
+        driver.lease = lease['lease_id']
+        (driver.report.directory / 'endpoint-lease.json').write_bytes(canonical(dict(lease_id=driver.lease,
+            run_id=os.environ['GITHUB_RUN_ID'], revision=os.environ['GITHUB_SHA'])))
         driver.invoke('broker', {'open': lease['lease_id']})
         opened = False
         terminal = None

@@ -29,6 +29,7 @@ ACCOUNT = '123456789012'
 
 def fixture(environment='demo-a', enabled=True):
     catalog = json.loads((ROOT / 'phase4/environments/catalog.json').read_text())
+    catalog['environments'][environment]['aws_account_id'] = ACCOUNT
     if enabled:
         catalog['environments'][environment].update(enabled=True, aws_account_id=ACCOUNT, backend_bucket='synthetic-offline-tests')
     scope = Scope.resolve(catalog, environment, ACCOUNT, 'us-east-1', ACCOUNT, 'us-east-1', REVISION)

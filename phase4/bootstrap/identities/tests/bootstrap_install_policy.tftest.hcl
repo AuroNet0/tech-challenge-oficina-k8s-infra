@@ -23,6 +23,26 @@ run "console_policy_matches_base_bootstrap_resources" {
   command = plan
 
   assert {
+    condition = (
+      toset([for statement in jsondecode(output.policy_documents.provision).Statement : statement.Resource if statement.Sid == "StateRead"][0]) ==
+      toset([for stack in ["infra", "platform", "edge"] : "arn:aws:s3:::${var.backend_bucket}/phase4/environments/demo-a/${stack}.tfstate"]) &&
+      [for statement in jsondecode(output.policy_documents.provision).Statement : statement.Action if statement.Sid == "StateRead"][0] == "s3:GetObject" &&
+      [for statement in jsondecode(output.policy_documents.provision).Statement : statement.Action if statement.Sid == "StateWrite"][0] == "s3:PutObject" &&
+      toset([for statement in jsondecode(output.policy_documents.provision).Statement : statement.Resource if statement.Sid == "StateWrite"][0]) ==
+      toset([for stack in ["infra", "platform", "edge"] : "arn:aws:s3:::${var.backend_bucket}/phase4/environments/demo-a/${stack}.tfstate"])
+    )
+    error_message = "Provision must retain exact state read/write coverage."
+  }
+  assert {
+    condition = length([for statement in jsondecode(output.policy_documents.provision).Statement : statement if statement.Sid == "StateLock"]) == 1 && alltrue([for statement in jsondecode(output.policy_documents.provision).Statement :
+      toset(statement.Action) == toset(["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]) &&
+      toset(statement.Resource) == toset([for stack in ["infra", "platform", "edge"] : "arn:aws:s3:::${var.backend_bucket}/phase4/environments/demo-a/${stack}.tfstate.tflock"]) &&
+      statement.Condition.StringEquals["s3:ResourceAccount"] == "446517826146" if statement.Sid == "StateLock"
+    ])
+    error_message = "Provision locking must cover exact lock objects with resource owner restriction."
+  }
+
+  assert {
     condition = toset([for statement in jsondecode(file("${path.module}/console/demo-a-bootstrap-install-policy.json")).Statement : statement.Resource if statement.Sid == "ManageDeclaredPolicies"][0]) == toset(concat(
       [for key, policy in aws_iam_policy.executor : "arn:aws:iam::446517826146:policy/${policy.name}"],
       [for key, policy in aws_iam_policy.workload_boundary : "arn:aws:iam::446517826146:policy/${policy.name}"]
@@ -49,11 +69,11 @@ run "console_policy_matches_base_bootstrap_resources" {
 
   assert {
     condition = (
-      output.identity_contract.subjects.provision == "repo:AuroNet0/tech-challenge-oficina-k8s-infra:environment:phase4-demo-a-provision" &&
+      output.identity_contract.subjects.provision == "repo:AuroNet0@128399450/tech-challenge-oficina-k8s-infra@1355187946:environment:phase4-demo-a-provision" &&
       alltrue([for name, policy in aws_iam_policy.workload_boundary :
         length(policy.policy) <= 6144 && jsondecode(policy.policy) == jsondecode(var.workload_boundary_documents[name])
       ])
     )
-    error_message = "Real boundary documents and classic subjects must survive provider validation without granting optional installation."
+    error_message = "Real boundary documents and immutable subjects must survive provider validation without granting optional installation."
   }
 }

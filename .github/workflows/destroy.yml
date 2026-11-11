@@ -1,0 +1,133 @@
+name: Destroy
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DESTROY demo-a
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+jobs:
+  teardown:
+    environment: phase4-demo-a-provision
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: provision
+      PROTECTED_ENVIRONMENT: phase4-demo-a-provision
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OPERATION: teardown
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REGION: us-east-1
+      REPORT_DIR: actions-report/execution
+      PHASE: ${{ inputs.phase || 'infra' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Validate explicit destruction authorization
+        id: gate
+        run: python scripts/environment-actions/pipeline.py gate
+      - uses: aws-actions/configure-aws-credentials@v4
+        id: aws
+        with:
+          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-provision
+          role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          allowed-account-ids: '446517826146'
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Recover inventory and remove owned Kubernetes resources
+        id: execute
+        run: python scripts/environment-actions/pipeline.py teardown
+      - name: Independently verify endpoint closure
+        if: ${{ always() && steps.aws.outcome == 'success' }}
+        env:
+          REPORT_DIR: actions-report/endpoint-close
+        run: python scripts/environment-actions/pipeline.py close --phase "$PHASE"
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: teardown
+        run: python scripts/environment-actions/finalize.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: teardown-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          if-no-files-found: error
+          retention-days: 7
+  destroy:
+    needs: teardown
+    if: ${{ always() && needs.teardown.result != 'cancelled' }}
+    environment: phase4-demo-a-destroy
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: destroy
+      PROTECTED_ENVIRONMENT: phase4-demo-a-destroy
+      CONFIRMATION: ${{ inputs.confirmation }}
+      OPERATION: destroy
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REGION: us-east-1
+      REPORT_DIR: actions-report/execution
+      PHASE: ${{ inputs.phase || 'infra' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Validate explicit destruction authorization
+        id: gate
+        run: python scripts/environment-actions/pipeline.py gate
+      - uses: aws-actions/configure-aws-credentials@v4
+        id: aws
+        with:
+          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-destroy
+          role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          allowed-account-ids: '446517826146'
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Destroy owned AWS resources and verify residuals
+        id: execute
+        run: python scripts/environment-actions/pipeline.py destroy
+      - name: Independently verify endpoint closure
+        if: ${{ always() && steps.aws.outcome == 'success' }}
+        env:
+          REPORT_DIR: actions-report/endpoint-close
+        run: python scripts/environment-actions/pipeline.py close --phase "$PHASE"
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: destroy
+        run: python scripts/environment-actions/finalize.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: destroy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          if-no-files-found: error
+          retention-days: 7

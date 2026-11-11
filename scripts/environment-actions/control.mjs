@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { TerraformCommandError, formatTerraformDiagnostic } from './terraform-diagnostics.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const prefix = 'tc-oficina-p4-demo-a';
@@ -42,14 +43,27 @@ export function aws(service, operation, parameters = [], execute = spawnSync) {
   const result = execute('aws', [service, operation, ...parameters, '--region', 'us-east-1', '--output', 'json',
     '--no-cli-pager', '--cli-connect-timeout', '5', '--cli-read-timeout', '15'],
   { encoding: 'utf8', timeout: 45000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, AWS_MAX_ATTEMPTS: '2' } });
-  if (result.status !== 0 || result.error) throw new Error(result.error?.code === 'ENOENT' ? 'AWS_CLI_UNAVAILABLE' : errorCode(result.stderr));
+  if (result.status !== 0 || result.error) {
+    const failure = new Error(result.error?.code === 'ENOENT' ? 'AWS_CLI_UNAVAILABLE' : errorCode(result.stderr));
+    const resourceIndex = parameters.findIndex(value => ['--bucket', '--role-name', '--name', '--function-name', '--db-instance-identifier'].includes(value));
+    failure.aws_call = { service, operation, resource: resourceIndex >= 0 ? parameters[resourceIndex + 1] : 'account/region' };
+    throw failure;
+  }
   try { return JSON.parse(result.stdout || '{}'); } catch { throw new Error('INVALID_JSON'); }
+}
+
+class AwsInspectionError extends Error {
+  constructor(error, service, operation, permissions) {
+    super(/^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message));
+    this.call = { service, operation };
+    this.permissions = permissions;
+  }
 }
 
 export class Report {
   constructor(operation, directory = process.env.REPORT_DIR || 'actions-report') {
     this.directory = directory;
-    this.data = { schema_version: 1, operation, environment: 'demo-a',
+    this.data = { schema_version: 1, operation, environment: 'demo-a', account: '446517826146', region: 'us-east-1',
       run_id: process.env.GITHUB_RUN_ID || 'offline', attempt: process.env.GITHUB_RUN_ATTEMPT || '1',
       revision: /^[a-f0-9]{40}$/.test(process.env.GITHUB_SHA || '') ? process.env.GITHUB_SHA : 'offline', checks: [], environment_ready: false };
   }
@@ -57,14 +71,30 @@ export class Report {
     const started = Date.now();
     let status = 'PASS';
     let reason = 'VERIFIED';
+    let failure;
     try {
       const result = await action();
-      if (result?.deferred) { status = 'DEFERRED'; reason = 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS'; }
+      if (result?.deferred) {
+        status = 'DEFERRED';
+        reason = /^[A-Z_]{3,100}$/.test(result.reason || '') ? result.reason : 'CONTROL_PLANE_ONLY_NO_KUBERNETES_ACCESS';
+      }
     } catch (error) {
       status = 'FAIL';
       reason = /^[A-Z][A-Z0-9_]{1,90}$/.test(error.message) ? error.message : errorCode(error.message);
+      if (error instanceof TerraformCommandError) {
+        failure = { exit_code: error.exitCode, diagnostics: error.diagnostics };
+        for (const diagnostic of error.diagnostics) {
+          const message = formatTerraformDiagnostic(diagnostic).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+          console.error(`::${diagnostic.severity}::${message}`);
+        }
+      }
+      if (error instanceof AwsInspectionError) {
+        failure = { aws_call: error.call, required_permissions: error.permissions };
+        console.error(`AWS inspection failed: ${error.call.service} ${error.call.operation} (${reason})`);
+      }
+      if (error.aws_call) failure = { aws_call: error.aws_call, required_permissions: [] };
     }
-    this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next });
+    this.data.checks.push({ phase, resource, status, duration_ms: Date.now() - started, reason, next_action: status === 'PASS' ? 'None' : next, ...failure });
     this.write();
     return status === 'PASS';
   }
@@ -74,8 +104,28 @@ export class Report {
     fs.writeFileSync(path.join(this.directory, 'report.json'), JSON.stringify(this.data, null, 2));
     const lines = [`# Environment ${this.data.operation}: ${this.data.result}`,
       `Run: ${this.data.run_id}, attempt: ${this.data.attempt}, revision: ${this.data.revision}`,
+      ...(this.data.scope ? [`Scope: ${this.data.scope}; environment readiness is not attested.`] : []),
       '', '| Phase | Resource | Status | ms | Reason | Next action |', '|---|---|---|---:|---|---|',
       ...this.data.checks.map(check => `| ${check.phase} | ${check.resource} | ${check.status} | ${check.duration_ms} | ${check.reason} | ${check.next_action} |`)];
+    for (const check of this.data.checks.filter(check => check.diagnostics)) {
+      lines.push('', `## ${check.phase} (exit ${check.exit_code})`, '');
+      for (const diagnostic of check.diagnostics) {
+        const message = formatTerraformDiagnostic(diagnostic).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        lines.push(`<pre>${message}</pre>`, '');
+      }
+    }
+    for (const check of this.data.checks.filter(check => check.aws_call)) {
+      lines.push('', `AWS call: ${check.aws_call.service} ${check.aws_call.operation} (${check.reason})`);
+      for (const permission of check.required_permissions) lines.push(`Required: ${permission.action} on ${permission.resource}`);
+    }
+    if (this.data.availability) {
+      const evidence = this.data.availability;
+      lines.push('', '## Availability evidence', '',
+        `Region: ${evidence.region}; instance type: ${evidence.instance_type}`, '',
+        '| Available AZ | Zone ID | Instance type offered |', '|---|---|---|',
+        ...evidence.available_zones.map(zone => `| ${zone.name} | ${zone.id} | ${evidence.offered_zones.includes(zone.name) ? 'Yes' : 'No'} |`),
+        '', `Candidates for operator review: ${evidence.candidate_zones.join(', ') || 'None'}. No zones selected automatically.`);
+    }
     fs.writeFileSync(path.join(this.directory, 'summary.md'), lines.join('\n') + '\n');
   }
   finish() {
@@ -87,6 +137,21 @@ export class Report {
 }
 
 function verify(condition, reason) { if (!condition) throw new Error(reason); }
+
+export function availabilityEvidence(config, call) {
+  verify(config.region === 'us-east-1' && config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+  const zones = call('ec2', 'describe-availability-zones', ['--filters', 'Name=zone-type,Values=availability-zone']).AvailabilityZones;
+  const offerings = call('ec2', 'describe-instance-type-offerings', ['--location-type', 'availability-zone', '--filters', `Name=instance-type,Values=${config.instance_type}`]).InstanceTypeOfferings;
+  const zoneName = name => typeof name === 'string' && /^us-east-1[a-z]$/.test(name);
+  const available = zones.filter(zone => zone.State === 'available' && zone.ZoneType === 'availability-zone'
+    && ['opt-in-not-required', 'opted-in'].includes(zone.OptInStatus) && zoneName(zone.ZoneName))
+    .map(zone => ({ name: zone.ZoneName, id: /^use1-az[0-9]+$/.test(zone.ZoneId || '') ? zone.ZoneId : 'unreported' }))
+    .sort((first, second) => first.name.localeCompare(second.name));
+  const offered = [...new Set(offerings.filter(item => item.InstanceType === config.instance_type
+    && item.LocationType === 'availability-zone' && zoneName(item.Location)).map(item => item.Location))].sort();
+  return { region: 'us-east-1', instance_type: 'm7i-flex.large', available_zones: available, offered_zones: offered,
+    candidate_zones: available.filter(zone => offered.includes(zone.name)).map(zone => zone.name) };
+}
 
 export function nodeChildArns(inventory, call) {
   const resources = Object.values(inventory.resources).flat();
@@ -139,10 +204,38 @@ export function context(config, environment = process.env) {
   verify(environment.GITHUB_EVENT_NAME === 'workflow_dispatch', 'MANUAL_DISPATCH_REQUIRED');
 }
 
-export function operationalGate(operation, confirmation, config, catalog, environment = process.env) {
+export function currentReview(review, account, region, scope) {
+  return review?.account === account && review.region === region && review.scope === scope
+    && Number.isFinite(review.valid_until)
+    && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
+    && typeof review.reference === 'string' && review.reference.trim().length > 0;
+}
+
+export function planningGate(runtime, catalog, scope, environment = process.env) {
+  verify(scope === 'infra', 'PLAN_SCOPE_REJECTED');
+  verify(environment.PHASE4_PLAN_APPROVED === 'true', 'PLAN_NOT_AUTHORIZED');
+  verify(runtime.account === '446517826146' && runtime.region === 'us-east-1' && runtime.environment === 'demo-a'
+    && typeof runtime.backend_bucket === 'string' && /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(runtime.backend_bucket)
+    && catalog.aws_region === runtime.region
+    && runtime.backend_bucket === catalog.backend_bucket && catalog.aws_account_id === runtime.account
+    && currentReview(runtime.preflight_authorization, runtime.account, runtime.region, scope)
+    && runtime.preflight_authorization.backend_permissions_reviewed === true, 'PLANNING_BACKEND_NOT_REVIEWED');
+}
+
+export function operationalGate(operation, confirmation, config, catalog, environment = process.env, runtime = {}) {
   context(config, environment);
   verify(['up', 'destroy'].includes(operation), 'OPERATION_REJECTED');
   verify(confirmation === `${operation.toUpperCase()} demo-a`, 'CONFIRMATION_REJECTED');
+  if (operation === 'up') {
+    const mode = environment.EXECUTION_MODE || 'apply';
+    verify(['plan', 'apply'].includes(mode), 'EXECUTION_MODE_REJECTED');
+    if (mode === 'plan') {
+      verify(environment.PHASE === 'infra' && !environment.PLAN_HASH, 'PLAN_SCOPE_OR_HASH_REJECTED');
+      planningGate(runtime, catalog, 'infra', environment);
+      return;
+    }
+    verify(/^[a-f0-9]{64}$/.test(environment.PLAN_HASH || '') || !['infra', 'platform', 'edge'].includes((environment.PHASE || '').split('-')[0]), 'APPROVED_PLAN_HASH_REQUIRED');
+  }
   verify((operation === 'destroy' || catalog.enabled) && catalog.aws_account_id === config.account && Boolean(catalog.backend_bucket), 'CATALOG_DISABLED');
   verify((operation === 'destroy' || config.execution_enabled === true) && environment.PHASE4_EXECUTION_APPROVED === 'true', 'EXECUTION_DISABLED');
 }
@@ -157,27 +250,69 @@ function tcp(host) {
   });
 }
 
-export async function preflight(config, catalog, report, call = aws, connect = tcp) {
+export function verifyInfraInputs(config, runtime) {
+  const inputs = runtime.terraform_inputs?.infra || {};
+  const roles = Object.fromEntries(['provision', 'deploy', 'destroy'].map(purpose =>
+    [purpose, `arn:aws:iam::${config.account}:role/${prefix}-${purpose}`]));
+  verify(JSON.stringify(inputs.availability_zones) === JSON.stringify(config.availability_zones)
+    && inputs.node_count === config.node_count && inputs.node_count === 2
+    && inputs.kubernetes_version === config.eks_version && inputs.postgres_version === config.postgres_version
+    && inputs.db_instance_class === config.rds_class && inputs.db_allocated_storage === 20
+    && inputs.eks_admin_role_arn === roles.provision
+    && Object.keys(inputs.automation_roles || {}).length === 3
+    && Object.entries(roles).every(([purpose, arn]) => inputs.automation_roles?.[purpose] === arn)
+    && Object.keys(inputs.workload_permissions_boundaries || {}).length === 2
+    && ['eks-cluster', 'eks-nodes'].every(name => inputs.workload_permissions_boundaries?.[name]
+      === `arn:aws:iam::${config.account}:policy/${prefix}-${name}-boundary`)
+    && Array.isArray(inputs.eks_public_access_cidrs) && inputs.eks_public_access_cidrs.length === 0,
+  'INFRA_INPUTS_NOT_REVIEWED');
+}
+
+export async function preflight(config, catalog, report, call = aws, connect = tcp, runtimeOverride) {
   const runtimeFile = path.join(root, 'phase4/environments/demo-a.runtime.json');
-  const runtime = fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {};
+  const runtime = runtimeOverride ?? (fs.existsSync(runtimeFile) ? JSON.parse(fs.readFileSync(runtimeFile)) : {});
+  const scope = process.env.PREFLIGHT_SCOPE || 'full';
+  const intent = process.env.PREFLIGHT_INTENT || 'apply';
+  if (!await report.check('preflight-scope', 'requested scope', () => verify(['infra', 'full'].includes(scope), 'PREFLIGHT_SCOPE_REJECTED'))) return;
+  if (!await report.check('preflight-intent', 'requested intent', () => verify(['inspect', 'plan', 'apply'].includes(intent)
+    && (intent !== 'plan' || scope === 'infra'), 'PREFLIGHT_INTENT_REJECTED'))) return;
+  report.data.scope = scope;
+  report.data.intent = intent;
+  report.data.free_plan_documentation = {
+    source: 'https://docs.aws.amazon.com/accounts/latest/reference/supported-services-sign-up-new.html',
+    reviewed_on: '2026-11-10', services_listed: ['eks', 'ec2', 'rds', 'ecr', 's3', 'iam'],
+    account_configuration_eligibility_confirmed: false,
+  };
+  const review = runtime.preflight_authorization || {};
+  const reviewCurrent = () => runtime.approved === true && currentReview(review, config.account, config.region, scope);
   const identityValid = await report.check('identity', 'STS', () => {
     const identity = call('sts', 'get-caller-identity');
     verify(identity.Account === config.account && /^arn:aws:sts::446517826146:assumed-role\/tc-oficina-p4-demo-a-provision\//.test(identity.Arn), 'OIDC_PROVISION_ROLE_REQUIRED');
   }, 'Install the provision role using the separate bootstrap procedure; never use root keys.');
   if (!identityValid) return;
-  await report.check('configuration', 'catalog', () => verify(catalog.enabled && catalog.aws_account_id === config.account && catalog.backend_bucket, 'CATALOG_DISABLED'));
+  await report.check('configuration', 'catalog metadata', () => verify(catalog.aws_account_id === config.account
+    && catalog.aws_region === config.region
+    && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket || ''), 'CATALOG_INCOMPLETE'));
+  await report.check('execution-gate', 'catalog and execution authorization', () => {
+    if (intent === 'inspect') return { deferred: true, reason: 'INSPECTION_DOES_NOT_AUTHORIZE_PLAN_OR_APPLY' };
+    if (intent === 'plan') { planningGate(runtime, catalog, scope); return; }
+    verify(catalog.enabled, 'CATALOG_DISABLED');
+    verify(config.execution_enabled === true, 'EXECUTION_DISABLED');
+    verify(process.env.PHASE4_EXECUTION_APPROVED === 'true', 'EXECUTION_DISABLED');
+  });
+  if (scope === 'infra') await report.check('infra-inputs', 'Terraform and preflight contracts', () => verifyInfraInputs(config, runtime));
   await report.check('account-plan', 'Free Tier', () => {
     const plan = call('freetier', 'get-account-plan-state');
     verify(plan.accountPlanType === 'FREE' && plan.accountPlanStatus === 'ACTIVE', 'ACCOUNT_PLAN_INCOMPATIBLE');
   }, 'Verify plan status in AWS Console; do not upgrade implicitly.');
   await report.check('service-entitlements', 'FREE account-specific operator review', () => {
-    const review = runtime.preflight_authorization || {};
-    verify(runtime.approved && review.account === config.account && review.region === config.region
-      && review.valid_until > Date.now() / 1000 && review.valid_until < Date.now() / 1000 + 86400
-      && ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager'].every(service => review.free_services_reviewed?.includes(service))
-      && typeof review.reference === 'string' && review.reference.length > 0, 'SERVICE_ENTITLEMENTS_NOT_PROVEN');
+    if (intent !== 'apply') return { deferred: true, reason: 'ACCOUNT_CONFIGURATION_ELIGIBILITY_REQUIRED_FOR_APPLY' };
+    const services = scope === 'infra' ? ['eks', 'rds', 'ec2', 'ecr', 'secretsmanager', 'logs', 'iam']
+      : ['eks', 'rds', 'ec2', 'ecr', 'elbv2', 'lambda', 'secretsmanager', 'logs', 'iam'];
+    verify(reviewCurrent() && review.free_plan_creation_reviewed === true
+      && services.every(service => review.free_services_reviewed?.includes(service)), 'SERVICE_ENTITLEMENTS_NOT_PROVEN');
   },
-    'Read APIs cannot prove permission to create EKS/RDS/ELB on FREE. Obtain account-specific evidence and implement its validation.');
+    'Operator must review FREE creation eligibility for the services/configurations in this scope, credits and expiry; record a current evidence reference. Get/List calls do not prove creation eligibility.');
   await report.check('backend', 'S3 persistent backend', () => {
     const bucket = catalog.backend_bucket;
     verify(typeof bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket), 'BACKEND_NOT_CONFIGURED');
@@ -191,8 +326,10 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     call('s3api', 'list-objects-v2', [...owner, '--prefix', 'phase4/environments/demo-a/', '--max-keys', '10']);
   }, 'Select a private, encrypted, versioned backend in us-east-1. No write probe is performed.');
   await report.check('backend-permissions', 'operator review of backend state and lock writes', () => {
-    verify(runtime.approved && runtime.preflight_authorization?.backend_permissions_reviewed === true
-      && runtime.preflight_authorization?.valid_until > Date.now() / 1000, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
+    if (intent === 'inspect') return { deferred: true, reason: 'BACKEND_WRITE_REVIEW_REQUIRED_FOR_PLAN' };
+    if (intent === 'plan') { planningGate(runtime, catalog, scope); return; }
+    verify(reviewCurrent() && review.backend_permissions_reviewed === true
+      && runtime.backend_bucket === catalog.backend_bucket, 'BACKEND_WRITE_PERMISSIONS_NOT_PROVEN');
   },
     'Review exact state and .tflock permissions; read-only checks cannot prove writes.');
   await report.check('oidc', 'GitHub provider', () => {
@@ -223,49 +360,71 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     verify(call('rds', 'describe-orderable-db-instance-options', ['--engine', 'postgres', '--engine-version', config.postgres_version,
       '--db-instance-class', config.rds_class]).OrderableDBInstanceOptions.length > 0, 'RDS_CLASS_UNAVAILABLE');
   });
+  let availability;
+  await report.check('availability-discovery', 'account AZs and instance type offerings', () => {
+    verify(config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+    availability = availabilityEvidence(config, call);
+    report.data.availability = availability;
+  }, 'Review available AZ names/IDs and instance type offerings in report.json before selecting two distinct AZs.');
   await report.check('network', 'Availability Zones', () => {
     verify(config.availability_zones.length === 2 && new Set(config.availability_zones).size === 2, 'TWO_AZS_REQUIRED');
-    const zones = call('ec2', 'describe-availability-zones').AvailabilityZones;
-    verify(config.availability_zones.every(name => zones.some(zone => zone.ZoneName === name && zone.State === 'available'
-      && ['opt-in-not-required', 'opted-in'].includes(zone.OptInStatus))), 'AZ_UNAVAILABLE');
+    verify(availability, 'AZ_DISCOVERY_REQUIRED');
+    verify(config.availability_zones.every(name => availability.available_zones.some(zone => zone.name === name)), 'AZ_UNAVAILABLE');
   });
   await report.check('capacity', 'two m7i-flex.large nodes', () => {
     verify(config.node_count === 2 && config.instance_type === 'm7i-flex.large', 'NODE_CONFIGURATION_REJECTED');
+    verify(config.availability_zones.length === 2 && new Set(config.availability_zones).size === 2, 'TWO_AZS_REQUIRED');
+    verify(availability, 'AZ_DISCOVERY_REQUIRED');
+    verify(config.availability_zones.every(name => availability.candidate_zones.includes(name)), 'NODE_AZ_OFFERING_UNAVAILABLE');
     const type = call('ec2', 'describe-instance-types', ['--instance-types', config.instance_type]).InstanceTypes[0];
-    const offered = call('ec2', 'describe-instance-type-offerings', ['--location-type', 'availability-zone', '--filters', `Name=instance-type,Values=${config.instance_type}`]).InstanceTypeOfferings;
-    verify(config.availability_zones.length === 2 && offered.some(item => item.Location === config.availability_zones[0]), 'NODE_AZ_OFFERING_UNAVAILABLE');
     const quota = call('service-quotas', 'get-service-quota', ['--service-code', 'ec2', '--quota-code', 'L-1216C47A']).Quota.Value;
     const instances = call('ec2', 'describe-instances', ['--filters', 'Name=instance-state-name,Values=pending,running,stopping,stopped']).Reservations.flatMap(item => item.Instances);
     const usage = instances.filter(instance => /^[acdhimrtz]/.test(instance.InstanceType) && instance.InstanceLifecycle !== 'spot')
       .reduce((total, instance) => total + instance.CpuOptions.CoreCount * instance.CpuOptions.ThreadsPerCore, 0);
-    verify(Number.isFinite(usage) && quota - usage >= 2 * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
+    const existing = instances.filter(instance => instance.InstanceType === config.instance_type
+      && instance.Tags?.some(tag => tag.Key === 'EnvironmentId' && tag.Value === 'demo-a')).length;
+    verify(Number.isFinite(usage) && quota - usage >= Math.max(0, 2 - existing) * type.VCpuInfo.DefaultVCpus, 'EC2_VCPU_QUOTA_INSUFFICIENT');
   }, 'Offerings and quotas cannot guarantee live EC2 capacity. Review usage and regional restrictions.');
   await report.check('inventory', 'previous resources and conflicts', () => {
+    verify(typeof catalog.backend_bucket === 'string' && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(catalog.backend_bucket), 'BACKEND_NOT_CONFIGURED');
+    const inspect = (service, operation, parameters = []) => {
+      try { return call(service, operation, parameters); }
+      catch (error) {
+        const permissions = service === 's3api' && operation === 'get-object'
+          ? [{ action: 's3:GetObject', resource: `arn:aws:s3:::${catalog.backend_bucket}/phase4/environments/demo-a/operations/inventory.json` }] : [];
+        throw new AwsInspectionError(error, service, operation, permissions);
+      }
+    };
     let inventory = { resources: {} };
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-preflight-'));
     try {
       const destination = path.join(directory, 'inventory.json');
-      call('s3api', 'get-object', ['--bucket', catalog.backend_bucket, '--key', 'phase4/environments/demo-a/operations/inventory.json', '--expected-bucket-owner', config.account, destination]);
+      inspect('s3api', 'get-object', ['--bucket', catalog.backend_bucket, '--key', 'phase4/environments/demo-a/operations/inventory.json', '--expected-bucket-owner', config.account, destination]);
       inventory = JSON.parse(fs.readFileSync(destination));
       verify(inventory.account === config.account && inventory.region === config.region && inventory.environment === 'demo-a', 'INVENTORY_SCOPE_REJECTED');
     } catch (error) {
       if (error.message !== 'NoSuchKey') throw error;
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
     const known = Object.values(inventory.resources).flat();
-    const external = [...Object.values(inventory.secrets || {}), ...(inventory.external_arns || []), ...nodeChildArns(inventory, call), ...albChildArns(inventory, call)];
-    const tagged = call('resourcegroupstaggingapi', 'get-resources', ['--tag-filters', 'Key=EnvironmentId,Values=demo-a']).ResourceTagMappingList;
-    const clusters = call('eks', 'list-clusters').clusters;
-    const databases = call('rds', 'describe-db-instances').DBInstances;
-    const vpcs = call('ec2', 'describe-vpcs', ['--filters', 'Name=cidr-block,Values=10.42.0.0/16']).Vpcs;
-    const repositories = call('ecr', 'describe-repositories').repositories.filter(item => item.repositoryName.startsWith(prefix));
+    const external = [...Object.values(inventory.secrets || {}), ...(inventory.external_arns || []), ...nodeChildArns(inventory, inspect), ...albChildArns(inventory, inspect)];
+    const tagged = inspect('resourcegroupstaggingapi', 'get-resources', ['--tag-filters', 'Key=EnvironmentId,Values=demo-a']).ResourceTagMappingList;
+    const clusters = inspect('eks', 'list-clusters').clusters;
+    const databases = inspect('rds', 'describe-db-instances').DBInstances;
+    const vpcs = inspect('ec2', 'describe-vpcs', ['--filters', 'Name=cidr-block,Values=10.42.0.0/16']).Vpcs;
+    const repositories = inspect('ecr', 'describe-repositories').repositories.filter(item => item.repositoryName.startsWith(prefix));
     verify(tagged.filter(item => item.Tags.some(tag => tag.Key === 'Lifecycle' && tag.Value === 'ephemeral')).every(item => known.some(resource => resource.arn === item.ResourceARN) || external.includes(item.ResourceARN))
       && (!clusters.includes(prefix) || known.some(resource => resource.type === 'aws_eks_cluster' && resource.id === prefix))
       && databases.filter(item => item.DBInstanceIdentifier === `${prefix}-postgres`).every(item => known.some(resource => resource.arn === item.DBInstanceArn))
       && vpcs.every(item => known.some(resource => resource.id === item.VpcId))
       && repositories.every(item => known.some(resource => resource.arn === item.repositoryArn)), 'EXISTING_RESOURCES_REQUIRE_STATE_RECONCILIATION');
-  }, 'Reconcile exact ARNs with the three persistent states and bootstrap inventory. Never delete or import by prefix alone.');
+  }, 'Review the failed AWS call and required permissions against the configured backend; reconcile exact ARNs before any IAM or state change.');
   await report.check('connectivity', 'private Kubernetes endpoint', async () => {
-    if (process.env.PREFLIGHT_SCOPE === 'infra') {
+    if (scope === 'infra') {
+      if (intent === 'apply') verify(['broker', 'existing-private'].includes(config.runner_mode) && runtime.endpoint?.mode === config.runner_mode
+          && runtime.endpoint.private_creation_reviewed === true && runtime.endpoint.teardown_reviewed === true
+          && runtime.destroy_offline_verified === true
+          && typeof runtime.endpoint.recovery_reference === 'string' && runtime.endpoint.recovery_reference.trim().length > 0,
+        'EKS_RECOVERY_STRATEGY_NOT_REVIEWED');
       try {
         const cluster = call('eks', 'describe-cluster', ['--name', prefix]).cluster;
         verify(cluster.resourcesVpcConfig.endpointPrivateAccess && !cluster.resourcesVpcConfig.endpointPublicAccess, 'INFRA_REQUIRES_CLOSED_ENDPOINT');
@@ -292,8 +451,11 @@ export async function preflight(config, catalog, report, call = aws, connect = t
     } catch (error) { if (error.message !== 'ResourceNotFound') throw error; }
     verify(typeof host === 'string' && /^[a-zA-Z0-9.-]+$/.test(host), 'PRIVATE_PATH_PROBE_REQUIRED');
     await connect(host);
-  }, 'Provide an existing private runner with routing, DNS and outbound GitHub access. A TCP probe is not Kubernetes authorization.');
+  }, scope === 'infra'
+    ? 'Review private creation and recovery; Kubernetes access and the independent canary must be proven after cluster creation, before dependent phases or any public opening.'
+    : 'Provide an existing private runner with routing, DNS and outbound GitHub access. A TCP probe is not Kubernetes authorization.');
   await report.check('artifacts', 'four reviewed service revisions', () => {
+    if (scope === 'infra') return { deferred: true, reason: 'SERVICE_ARTIFACTS_REQUIRED_AFTER_INFRA' };
     for (const service of ['auth', 'os', 'execution', 'billing']) {
       const source = runtime.services?.[service];
       verify(source && /^AuroNet0\/tech-challenge-oficina-[a-z-]+$/.test(source.repository)
@@ -306,7 +468,9 @@ export async function preflight(config, catalog, report, call = aws, connect = t
         return check && check.head_sha === source.revision && check.status === 'completed' && check.conclusion === 'success';
       }), 'APPROVED_SERVICE_CI_REQUIRED');
     }
-  }, 'Pin clean revisions and verify source access, CI, CA, signing, ACM, Mercado Pago and New Relic inputs.');
+  }, scope === 'infra'
+    ? 'Service publication and external integrations are deferred until their dependent phases; no application readiness is attested by Infra.'
+    : 'Pin clean revisions and verify source access, CI, CA, signing, ACM, Mercado Pago and New Relic inputs.');
 }
 
 async function main() {
@@ -318,7 +482,8 @@ async function main() {
     const valid = await report.check('gate', 'repository and manual dispatch', () => context(config));
     if (valid && operation === 'preflight') await preflight(config, catalog, report);
     else if (valid) {
-      await report.check('gate', 'mutation disabled', () => operationalGate(operation, process.env.CONFIRMATION, config, catalog));
+      const runtime = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/demo-a.runtime.json')));
+      await report.check('gate', 'requested operation', () => operationalGate(operation, process.env.CONFIRMATION, config, catalog, process.env, runtime));
     }
   } catch { await report.check('configuration', 'input files', () => { throw new Error('CONFIGURATION_INVALID'); }); }
   process.exitCode = report.finish();

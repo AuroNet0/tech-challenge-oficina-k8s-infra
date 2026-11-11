@@ -20,13 +20,21 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.report = Report('test', self.temporary.name)
         self.config = dict(approved=True, account=ACCOUNT, region='us-east-1', environment='demo-a',
-            backend_bucket='approved-backend', destroy_offline_verified=True, terraform_inputs={})
+            backend_bucket='approved-backend', destroy_offline_verified=True, terraform_inputs={},
+            endpoint=dict(mode='broker', private_creation_reviewed=True, teardown_reviewed=True,
+                          independent_canary_verified=False, recovery_reference='offline-reviewed-teardown'),
+            preflight_authorization=dict(account=ACCOUNT, region='us-east-1', scope='infra',
+                valid_until=time.time() + 3600, reference='offline-plan-and-creation-review',
+                backend_permissions_reviewed=True, free_plan_creation_reviewed=True,
+                free_services_reviewed=['eks', 'ec2', 'rds', 'ecr', 'iam', 'logs', 'secretsmanager']))
         self.driver = Driver(self.config, self.report, sleep=lambda duration: None)
         self.addCleanup(self.driver.temporary.cleanup)
-        self.catalog = dict(enabled=True, aws_account_id=ACCOUNT, backend_bucket='approved-backend')
+        self.catalog = dict(enabled=True, aws_account_id=ACCOUNT, aws_region='us-east-1', backend_bucket='approved-backend')
+        self.driver.catalog = self.catalog
+        self.driver.execution_configuration = dict(execution_enabled=True)
         self.environment = dict(GITHUB_REPOSITORY='AuroNet0/tech-challenge-oficina-k8s-infra',
             GITHUB_REF='refs/heads/homolog', GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_SHA='a' * 40,
-            PHASE4_EXECUTION_APPROVED='true', CONFIRMATION='UP demo-a')
+            PHASE4_EXECUTION_APPROVED='true', PHASE4_PLAN_APPROVED='true', CONFIRMATION='UP demo-a')
 
     def test_authorization_before_aws(self):
         guard('up', self.config, self.catalog, self.environment)
@@ -40,13 +48,11 @@ class RuntimeTests(unittest.TestCase):
         guard('destroy', self.config, dict(self.catalog, enabled=False),
               dict(self.environment, CONFIRMATION='DESTROY demo-a'))
 
-    def test_new_configuration_is_disabled(self):
-        from runtime import ROOT
-        configuration = json.loads((ROOT / 'phase4/environments/demo-a.runtime.json').read_text())
-        self.assertFalse(configuration['approved'])
-        catalog = json.loads((ROOT / 'phase4/environments/catalog.json').read_text())
-        self.assertFalse(catalog['environments']['demo-a']['enabled'])
-        self.assertFalse(catalog['environments']['demo-b']['enabled'])
+    def test_unapproved_configuration_cannot_pass_the_execution_gate(self):
+        with self.assertRaisesRegex(Failure, 'BACKEND_NOT_APPROVED'):
+            guard('up', dict(self.config, approved=False), self.catalog, self.environment)
+        with self.assertRaisesRegex(Failure, 'DESTROY_VALIDATION_REQUIRED'):
+            guard('up', dict(self.config, destroy_offline_verified=False), self.catalog, self.environment)
 
     def test_plan_only_does_not_apply_and_hash_binds_approved_changes(self):
         document = dict(resource_changes=[dict(address='aws_vpc.environment', change=dict(actions=['create']))])
@@ -56,13 +62,13 @@ class RuntimeTests(unittest.TestCase):
         self.driver.tf = lambda stack, arguments: (commands.append(arguments) or (json.dumps(document) if arguments[0] == 'show' else ''))
         self.driver.save = lambda: None
         self.driver.snapshot = lambda stack: []
-        with patch.dict(os.environ, GITHUB_SHA='a' * 40):
+        with patch.dict(os.environ, self.environment):
             self.assertEqual(self.driver.plan_apply('infra'), 'PLAN_ONLY')
             self.assertFalse(any(command[0] == 'apply' for command in commands))
             fingerprint = json.loads((Path(self.temporary.name) / 'plan.json').read_text())['sha256']
             with self.assertRaisesRegex(Failure, 'APPROVED_PLAN_HASH_MISMATCH'):
-                self.driver.plan_apply('infra', 'b' * 64)
-            self.assertEqual(self.driver.plan_apply('infra', fingerprint), 'APPLIED')
+                self.driver.plan_apply('infra', 'b' * 64, execution_mode='apply')
+            self.assertEqual(self.driver.plan_apply('infra', fingerprint, execution_mode='apply'), 'APPLIED')
         self.assertEqual(sum(command[0] == 'apply' for command in commands), 1)
 
     def test_partial_apply_preserves_original_failure_if_snapshot_also_fails(self):
@@ -71,13 +77,13 @@ class RuntimeTests(unittest.TestCase):
         self.driver.save = lambda: None
         self.driver.snapshot = lambda stack: (_ for _ in ()).throw(Failure('SNAPSHOT_DENIED'))
         self.driver.tf = lambda stack, args: json.dumps(dict(resource_changes=[])) if args[0] == 'show' else ''
-        with patch.dict(os.environ, GITHUB_SHA='a' * 40):
+        with patch.dict(os.environ, self.environment):
             self.driver.plan_apply('infra')
             fingerprint = json.loads((Path(self.temporary.name) / 'plan.json').read_text())['sha256']
             original = self.driver.tf
             self.driver.tf = lambda stack, args: (_ for _ in ()).throw(Failure('ACCESS_DENIED')) if args[0] == 'apply' else original(stack, args)
             with self.assertRaisesRegex(Failure, 'ACCESS_DENIED'):
-                self.driver.plan_apply('infra', fingerprint)
+                self.driver.plan_apply('infra', fingerprint, execution_mode='apply')
 
     def test_destroy_without_cluster_still_cleans_stacks_and_artifacts(self):
         order = []
@@ -154,10 +160,89 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(caught.exception.detail['diagnostics'][0]['resource'], 'aws_eks_cluster.environment')
 
     def test_endpoint_configuration_requires_independent_canary_before_invocation(self):
+        self.driver.config['endpoint'] = {}
         self.driver.cluster = lambda: dict(status='ACTIVE')
         with self.assertRaisesRegex(Failure, 'BROKER_CONFIGURATION_REQUIRED'):
             with self.driver.kubernetes():
                 self.fail('must not enter')
+
+    def test_disabled_environment_can_only_plan_with_planning_authorization(self):
+        self.config.update(approved=False, destroy_offline_verified=False, endpoint={})
+        self.config['preflight_authorization'].pop('free_plan_creation_reviewed')
+        self.catalog['enabled'] = False
+        self.driver.execution_configuration['execution_enabled'] = False
+        calls = []
+        self.driver.init = lambda stack: calls.append('init')
+        self.driver.variables = lambda *args: dict(environment_id='demo-a')
+        self.driver.tf = lambda stack, args: calls.append(args[0]) or ('{"resource_changes":[]}' if args[0] == 'show' else '')
+        self.driver.save = lambda: self.fail('plan must not write the journal')
+        with patch.dict(os.environ, self.environment):
+            self.assertEqual(self.driver.plan_apply('infra'), 'PLAN_ONLY')
+            with self.assertRaisesRegex(Failure, 'PLAN_HASH_NOT_ALLOWED'):
+                self.driver.plan_apply('infra', 'a' * 64)
+            with patch.dict(os.environ, PHASE4_PLAN_APPROVED='false'):
+                with self.assertRaisesRegex(Failure, 'PLAN_NOT_AUTHORIZED'):
+                    self.driver.plan_apply('infra')
+        summary = json.loads((self.report.directory / 'plan.json').read_text())
+        self.assertTrue(summary['requires_enabled_replan'])
+        self.assertNotIn('apply', calls)
+        self.assertNotIn('destroy', calls)
+
+    def test_apply_failures_never_execute_apply_or_save(self):
+        for missing in ('hash', 'wrong-hash', 'authorization', 'creation', 'recovery', 'expiry', 'planning-input'):
+            with self.subTest(missing=missing):
+                configuration = copy.deepcopy(self.config)
+                if missing == 'creation':
+                    configuration['preflight_authorization']['free_plan_creation_reviewed'] = False
+                if missing == 'recovery':
+                    configuration['endpoint']['teardown_reviewed'] = False
+                if missing == 'expiry':
+                    configuration['preflight_authorization']['valid_until'] = 1
+                calls = []
+                driver = Driver(configuration, self.report, catalog=self.catalog, execution_configuration=dict(execution_enabled=True))
+                try:
+                    driver.init = lambda stack: calls.append('init')
+                    driver.variables = lambda *args: dict(planning_only=missing == 'planning-input')
+                    driver.tf = lambda stack, args: calls.append(args[0]) or ('{"resource_changes":[]}' if args[0] == 'show' else '')
+                    driver.save = lambda: calls.append('save')
+                    environment = dict(self.environment, PHASE4_EXECUTION_APPROVED='false' if missing == 'authorization' else 'true')
+                    with patch.dict(os.environ, environment):
+                        with self.assertRaises(Failure):
+                            with self.report.phase('negative-apply', missing):
+                                driver.plan_apply('infra', '' if missing == 'hash' else 'b' * 64, execution_mode='apply')
+                    self.assertNotIn('apply', calls)
+                    self.assertNotIn('destroy', calls)
+                    self.assertNotIn('save', calls)
+                    self.assertEqual(self.report.data['checks'][-1]['status'], 'FAIL')
+                finally:
+                    driver.temporary.cleanup()
+
+    def test_recovery_is_rechecked_after_plan_before_apply(self):
+        self.driver.init = lambda stack: None
+        self.driver.variables = lambda *args: {}
+        calls = []
+
+        def terraform(stack, arguments):
+            calls.append(arguments[0])
+            if arguments[0] == 'show':
+                return '{"resource_changes":[]}'
+            return ''
+
+        self.driver.tf = terraform
+        self.driver.save = lambda: self.fail('recovery failure must precede checkpoint writes')
+        with patch.dict(os.environ, self.environment):
+            self.driver.plan_apply('infra')
+            fingerprint = json.loads((self.report.directory / 'plan.json').read_text())['sha256']
+
+            def revoke_recovery(stack, arguments):
+                if arguments[0] == 'show':
+                    self.config['endpoint']['teardown_reviewed'] = False
+                return terraform(stack, arguments)
+
+            self.driver.tf = revoke_recovery
+            with self.assertRaisesRegex(Failure, 'EKS_RECOVERY_STRATEGY_NOT_REVIEWED'):
+                self.driver.plan_apply('infra', fingerprint, execution_mode='apply')
+        self.assertNotIn('apply', calls)
 
     def test_close_without_lease_verifies_private_endpoint(self):
         self.driver.cluster = lambda missing_ok=False: dict(resourcesVpcConfig=dict(endpointPublicAccess=False, endpointPrivateAccess=True))

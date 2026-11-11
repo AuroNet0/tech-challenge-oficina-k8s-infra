@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import urllib.request
 
-from runtime import PREFIX, REGION, Failure, canonical, require
+from runtime import ACCOUNT, PREFIX, REGION, Failure, canonical, cleanup_steps, require
 
 
 def network_probe(driver):
@@ -26,6 +26,7 @@ def network_probe(driver):
             egress=[{'to': [dict(podSelector=dict(matchLabels={'probe-id': name}))], 'ports': [dict(protocol='TCP', port=18080)]}]))
     driver.apply_bundle(dict(kind='List', items=[server, policy]))
     jobs = []
+    original_error = None
     try:
         driver.kubectl(['wait', 'pod/' + name, '-n', PREFIX, '--for=condition=Ready', '--timeout=120s'])
         address = json.loads(driver.kubectl(['get', 'pod', name, '-n', PREFIX, '-o', 'json']))['status']['podIP']
@@ -44,11 +45,14 @@ def network_probe(driver):
             driver.apply_bundle(dict(kind='List', items=[job]))
             driver.kubectl(['wait', 'job/' + client_name, '-n', PREFIX, '--for=condition=complete', '--timeout=60s'])
         driver.receipt('network-policy', dict(verified=True, positive_and_negative_probe=True))
+    except BaseException as error:
+        original_error = error
+        raise
     finally:
-        for job in jobs:
-            driver.kubectl(['delete', 'job', job, '-n', PREFIX, '--ignore-not-found=true'])
-        driver.kubectl(['delete', 'pod', name, '-n', PREFIX, '--ignore-not-found=true'])
-        driver.kubectl(['delete', 'networkpolicy', name, '-n', PREFIX, '--ignore-not-found=true'])
+        resources = [('job', job) for job in jobs] + [('pod', name), ('networkpolicy', name)]
+        cleanup_steps(driver.report, [(kind + '/' + identifier,
+            lambda kind=kind, identifier=identifier: driver.kubectl(['delete', kind, identifier, '-n', PREFIX, '--ignore-not-found=true']))
+            for kind, identifier in resources], original_error)
 
 
 def foundation(driver, platform):
@@ -126,7 +130,8 @@ def alb(driver):
 
 def observability(driver, platform):
     contract = platform['observability']
-    require(driver.config.get('observability_privileged_approved') is True, 'OBSERVABILITY_NAMESPACE_APPROVAL_REQUIRED')
+    require(driver.config.get('observability_privileged_approved') is True
+            or getattr(driver, 'authorization_source', None) == 'github-environment', 'OBSERVABILITY_NAMESPACE_APPROVAL_REQUIRED')
     value = driver.api('secretsmanager', 'get_secret_value', SecretId=driver.config['new_relic_secret_arn'])['SecretString']
     licence = json.loads(value)['licenseKey']
     from kubernetes import client, config
@@ -167,6 +172,42 @@ def verify_databases(driver, platform):
     driver.receipt('databases', dict(verified=True, grants_and_migrations_verified=True))
     cleanup_temporary(driver, 'bootstrap')
     cleanup_temporary(driver, 'migration')
+
+
+def validate_phase(driver, phase):
+    if phase == 'e2e':
+        raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
+    if phase.startswith('recovery-'):
+        require(driver.config.get('endpoint', {}).get('mode') == 'broker', 'BROKER_CONFIGURATION_REQUIRED')
+        require(driver.cluster(missing_ok=True), 'EXISTING_CLUSTER_REQUIRED')
+        return
+    if phase == 'release':
+        from pipeline import gh_json
+        for service in ('auth', 'os', 'execution', 'billing'):
+            source = driver.config.get('services', {}).get(service, {})
+            require(re.fullmatch(r'AuroNet0/tech-challenge-oficina-[a-z-]+', source.get('repository', ''))
+                    and re.fullmatch(r'[0-9a-f]{40}', source.get('revision', ''))
+                    and source.get('required_checks'), 'APPROVED_SERVICE_REVISIONS_REQUIRED', service)
+            pages = gh_json(['--paginate', '--slurp', f"repos/{source['repository']}/commits/{source['revision']}/check-runs?per_page=100"], source=True)
+            checks = [check for page in pages for check in page['check_runs']]
+            for name in source['required_checks']:
+                matching = sorted((check for check in checks if check['name'] == name), key=lambda check: check['id'])
+                require(matching and matching[-1]['head_sha'] == source['revision']
+                        and matching[-1]['status'] == 'completed' and matching[-1]['conclusion'] == 'success',
+                        'APPROVED_SERVICE_CI_REQUIRED', service + ':' + name)
+        require(driver.journal['resources'].get('infra'), 'INFRA_CHECKPOINT_REQUIRED')
+        bucket = PREFIX + '-artifacts'
+        owner = dict(Bucket=bucket, ExpectedBucketOwner=ACCOUNT)
+        require(driver.api('s3', 'get_bucket_versioning', **owner).get('Status') == 'Enabled', 'ARTIFACT_FOUNDATION_REQUIRED', bucket)
+        return
+    require(driver.cluster(missing_ok=True), 'EXISTING_CLUSTER_REQUIRED')
+    if phase not in ('diagnose',):
+        require(driver.journal['resources'].get('platform'), 'PLATFORM_CHECKPOINT_REQUIRED')
+    if phase == 'observability':
+        require(driver.config.get('new_relic_secret_arn'), 'NEW_RELIC_SECRET_REQUIRED')
+    if phase in ('foundation', 'controller', 'secrets', 'data', 'migrate', 'apps', 'ingress', 'health', 'observability', 'diagnose'):
+        if driver.config.get('endpoint', {}).get('mode') == 'broker':
+            require(driver.invoke('recovery', {'probe': True}).get('verified') is True, 'LIVE_RECOVERY_PROBE_FAILED')
 
 
 def up_phase(driver, phase):

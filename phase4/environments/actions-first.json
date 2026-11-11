@@ -7,7 +7,10 @@
   "runner_mode": "broker",
   "execution_enabled": false,
   "private_probe_host": null,
-  "availability_zones": [],
+  "availability_zones": [
+    "us-east-1a",
+    "us-east-1b"
+  ],
   "eks_version": "1.35",
   "postgres_version": "17.10",
   "node_count": 2,

@@ -58,6 +58,7 @@ class ReleaseTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.folder = Path(self.temporary.name)
         self.catalog = json.loads((ROOT / "phase4/environments/catalog.json").read_text())
+        self.catalog['environments']['demo-a']['aws_account_id'] = ACCOUNT
         self.request = {"scope": {"environment_id": "demo-a", "account": ACCOUNT, "region": "us-east-1"},
                         "infra_revision": REVISION, "applications": {
                             name: {"repository": repository, "revision": REVISION} for name, repository in REPOSITORIES.items()}}

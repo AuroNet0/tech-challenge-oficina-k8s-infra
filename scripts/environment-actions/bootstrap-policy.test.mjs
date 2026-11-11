@@ -82,10 +82,9 @@ test('backend object access is restricted to the state and lock, with no state d
 test('no future service installation is authorized and current Actions contracts still match', () => {
   assert.ok(policy.Statement.flatMap(statement => array(statement.Action))
     .every(action => action.startsWith('iam:') || action.startsWith('s3:')));
-  const workflow = fs.readFileSync(new URL('../../.github/workflows/environment-bootstrap-identities.yml', import.meta.url), 'utf8');
+  const workflow = fs.readFileSync(new URL('../../.github/actions/setup/action.yml', import.meta.url), 'utf8');
   const executor = fs.readFileSync(new URL('bootstrap.mjs', import.meta.url), 'utf8');
-  assert.ok(workflow.includes(`role-to-assume: arn:aws:iam::${account}:role/${prefix}-bootstrap`));
-  assert.ok(workflow.includes('environment: phase4-demo-a-bootstrap'));
+  assert.ok(!fs.existsSync(new URL('../../.github/workflows/environment-bootstrap-identities.yml', import.meta.url)));
   assert.ok(workflow.includes('terraform_version: 1.15.8'));
   assert.ok(executor.includes("process.env.TF_WORKSPACE = 'default'"));
   assert.ok(executor.includes(`-backend-config=key=${key}`));

@@ -3,13 +3,18 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Report, errorCode } from './control.mjs';
+import { terraformDiagnostics } from './terraform-diagnostics.mjs';
 
 export function command(executable, argumentsList, execute = spawnSync) {
   const started = Date.now();
   const result = execute(executable, argumentsList, { encoding: 'utf8', timeout: executable === 'terraform' ? 600000 : 60000, maxBuffer: 8 * 1024 * 1024 });
-  return { status: result.error ? 1 : result.status ?? 1, duration_ms: Date.now() - started,
+  const status = result.error ? 1 : result.status ?? 1;
+  return { status, duration_ms: Date.now() - started,
     reason: result.status === 0 && !result.error ? 'VERIFIED'
-      : result.error?.code === 'ENOENT' ? 'EXECUTABLE_UNAVAILABLE' : errorCode(result.stderr), stdout: result.stdout || '' };
+      : result.error?.code === 'ENOENT' ? 'EXECUTABLE_UNAVAILABLE' : errorCode(result.stderr), stdout: result.stdout || '',
+    ...(executable === 'terraform' && status !== 0 ? {
+      diagnostics: terraformDiagnostics(result.stdout || '', result.stderr || '', argumentsList.includes('validate') && argumentsList.includes('-json')),
+    } : {}) };
 }
 
 export async function terraformValidation(directory, report, execute = spawnSync) {

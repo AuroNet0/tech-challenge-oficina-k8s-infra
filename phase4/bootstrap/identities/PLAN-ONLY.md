@@ -1,5 +1,9 @@
 # Primeiro bootstrap plan-only — demo-a
 
+> Registro histórico. Os workflows e gates citados foram substituídos por Plan,
+> Deploy e Destroy. Para operar sem editar JSON por execução, consulte o guia
+> `docs/github-actions-first.md` na raiz do repositório.
+
 Entradas preparadas em `approved-inputs.json`: conta `446517826146`, regiao `us-east-1`, bucket `tech-challenge-oficina-terraform-state-b1cfa326`, `subject_format=classic`. OIDC/trust inicial considerados confirmados pelo operador, nao consultados nesta implementacao.
 `installation_approved=true` e `oidc_claims_verified=true` satisfazem os guards do Terraform; **nao disparam apply**. A variavel remota `PHASE4_BOOTSTRAP_APPROVED=false` continua bloqueando o workflow antes da autenticacao. Nao alteramos GitHub nem habilitamos ambientes.
 

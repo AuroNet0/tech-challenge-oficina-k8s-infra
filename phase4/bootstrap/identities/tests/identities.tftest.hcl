@@ -1,6 +1,6 @@
 mock_provider "aws" {
   override_during = plan
-  mock_data "aws_caller_identity" { defaults = { account_id = "123456789012" } }
+  mock_data "aws_caller_identity" { defaults = { account_id = "446517826146" } }
   mock_data "aws_iam_openid_connect_provider" {
     defaults = { url = "token.actions.githubusercontent.com", client_id_list = ["sts.amazonaws.com"] }
   }
@@ -8,7 +8,7 @@ mock_provider "aws" {
 
 variables {
   environment_id        = "demo-a"
-  aws_account_id        = "123456789012"
+  aws_account_id        = "446517826146"
   aws_region            = "us-east-1"
   backend_bucket        = "synthetic-persistent-state"
   installation_approved = true
@@ -36,7 +36,7 @@ run "persistent_oidc_and_no_opening" {
     error_message = "PassRole deve ser exato e destroy deve negar sem inventario aprovado."
   }
   assert {
-    condition     = jsondecode(output.policy_documents.recovery).Statement[1].Condition.Bool["eks:endpointPublicAccess"] == "false" && jsondecode(output.policy_documents.recovery).Statement[1].Resource == "arn:aws:eks:us-east-1:123456789012:cluster/tc-oficina-p4-demo-a"
+    condition     = jsondecode(output.policy_documents.recovery).Statement[1].Condition.Bool["eks:endpointPublicAccess"] == "false" && jsondecode(output.policy_documents.recovery).Statement[1].Resource == "arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a"
     error_message = "Recuperacao deve somente fechar cluster selecionado."
   }
 }
@@ -70,19 +70,19 @@ run "reject_foreign_region" {
 
 run "reject_foreign_secret" {
   command = plan
-  variables { inventory = { secrets = { auth-postgres = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/oficina/phase4/demo-b/auth-postgres-ABC123" } } }
+  variables { inventory = { secrets = { auth-postgres = "arn:aws:secretsmanager:us-east-1:446517826146:secret:/oficina/phase4/demo-b/auth-postgres-ABC123" } } }
   expect_failures = [var.inventory]
 }
 
 run "reject_issuer_secret" {
   command = plan
-  variables { inventory = { secrets = { auth-signing = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/oficina/phase4/demo-a/auth-signing-ABC123" } } }
+  variables { inventory = { secrets = { auth-signing = "arn:aws:secretsmanager:us-east-1:446517826146:secret:/oficina/phase4/demo-a/auth-signing-ABC123" } } }
   expect_failures = [var.inventory]
 }
 
 run "reject_foreign_named_resource" {
   command = plan
-  variables { inventory = { workload_roles = ["arn:aws:iam::123456789012:role/tc-oficina-p4-demo-b-auth-lambda"] } }
+  variables { inventory = { workload_roles = ["arn:aws:iam::446517826146:role/tc-oficina-p4-demo-b-auth-lambda"] } }
   expect_failures = [terraform_data.guard]
 }
 
@@ -99,10 +99,10 @@ run "exact_destroy_inventory" {
   command = plan
   variables {
     inventory_approved   = true
-    destroy_confirmation = "DESTROY demo-a 123456789012 tc-oficina-p4-demo-a"
+    destroy_confirmation = "DESTROY demo-a 446517826146 tc-oficina-p4-demo-a"
     inventory = {
-      secrets = { auth-postgres = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/oficina/phase4/demo-a/auth-postgres-ABC123" }
-      ec2     = ["arn:aws:ec2:us-east-1:123456789012:vpc/vpc-00000000000000001"]
+      secrets = { auth-postgres = "arn:aws:secretsmanager:us-east-1:446517826146:secret:/oficina/phase4/demo-a/auth-postgres-ABC123" }
+      ec2     = ["arn:aws:ec2:us-east-1:446517826146:vpc/vpc-00000000000000001"]
     }
   }
   assert {
@@ -128,9 +128,9 @@ run "reviewed_workload_boundaries" {
   command = plan
   variables {
     inventory_approved          = true
-    workload_boundary_documents = { for name in ["eks-cluster", "eks-nodes", "ebs-csi", "load-balancer-controller", "auth-lambda"] : name => "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"eks:DescribeCluster\",\"Resource\":\"arn:aws:eks:us-east-1:123456789012:cluster/tc-oficina-p4-demo-a\"}]}" }
+    workload_boundary_documents = { for name in ["eks-cluster", "eks-nodes", "ebs-csi", "load-balancer-controller", "auth-lambda"] : name => "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"eks:DescribeCluster\",\"Resource\":\"arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a\"}]}" }
     inventory = {
-      workload_boundaries = { for name in ["eks-cluster", "eks-nodes", "ebs-csi", "load-balancer-controller", "auth-lambda"] : name => "arn:aws:iam::123456789012:policy/tc-oficina-p4-demo-a-${name}-boundary" }
+      workload_boundaries = { for name in ["eks-cluster", "eks-nodes", "ebs-csi", "load-balancer-controller", "auth-lambda"] : name => "arn:aws:iam::446517826146:policy/tc-oficina-p4-demo-a-${name}-boundary" }
     }
   }
   assert {

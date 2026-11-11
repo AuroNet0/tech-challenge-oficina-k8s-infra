@@ -1,0 +1,137 @@
+name: Plan
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Phase or checkpoint to review and execute
+        type: choice
+        required: true
+        default: infra
+        options:
+          - infra
+          - release
+          - platform
+          - foundation
+          - controller
+          - secrets
+          - data
+          - platform-migration
+          - migrate
+          - edge
+          - edge-auth
+          - jwks
+          - platform-apps
+          - apps
+          - edge-alb
+          - ingress
+          - alb-check
+          - edge-business
+          - observability
+          - health
+          - e2e
+          - diagnose
+          - recovery-closed
+          - recovery-expiry
+          - iam-maintenance
+          - artifact-foundation
+          - recovery-foundation
+          - recovery-activate
+permissions:
+  contents: read
+  actions: read
+env:
+  SOURCE_AUTH_REVISION: ${{ vars.SOURCE_AUTH_REVISION }}
+  SOURCE_AUTH_CHECKS: ${{ vars.SOURCE_AUTH_CHECKS }}
+  SOURCE_OS_REVISION: ${{ vars.SOURCE_OS_REVISION }}
+  SOURCE_OS_CHECKS: ${{ vars.SOURCE_OS_CHECKS }}
+  SOURCE_EXECUTION_REVISION: ${{ vars.SOURCE_EXECUTION_REVISION }}
+  SOURCE_EXECUTION_CHECKS: ${{ vars.SOURCE_EXECUTION_CHECKS }}
+  SOURCE_BILLING_REVISION: ${{ vars.SOURCE_BILLING_REVISION }}
+  SOURCE_BILLING_CHECKS: ${{ vars.SOURCE_BILLING_CHECKS }}
+  NETWORK_PROBE_IMAGE: ${{ vars.NETWORK_PROBE_IMAGE }}
+  MONGODB_IMAGE: ${{ vars.MONGODB_IMAGE }}
+  RABBITMQ_IMAGE: ${{ vars.RABBITMQ_IMAGE }}
+  POSTGRES_IMAGE: ${{ vars.POSTGRES_IMAGE }}
+  EKS_VPC_CNI_VERSION: ${{ vars.EKS_VPC_CNI_VERSION }}
+  EKS_EBS_CSI_VERSION: ${{ vars.EKS_EBS_CSI_VERSION }}
+  EKS_POD_IDENTITY_VERSION: ${{ vars.EKS_POD_IDENTITY_VERSION }}
+  ALB_CERTIFICATE_ARN: ${{ vars.ALB_CERTIFICATE_ARN }}
+  ALB_SERVER_NAME: ${{ vars.ALB_SERVER_NAME }}
+  MERCADO_PAGO_TEST_SECRET_ARN: ${{ vars.MERCADO_PAGO_TEST_SECRET_ARN }}
+  NEW_RELIC_SECRET_ARN: ${{ vars.NEW_RELIC_SECRET_ARN }}
+  RECOVERY_ALARM_TOPIC_ARN: ${{ vars.RECOVERY_ALARM_TOPIC_ARN }}
+  SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+jobs:
+  plan:
+    environment: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'phase4-demo-a-bootstrap' || 'phase4-demo-a-provision' }}
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'bootstrap' || 'provision' }}
+      OPERATION: plan
+      PLAN_ARTIFACT_KEY: ${{ secrets.PLAN_ARTIFACT_KEY }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_REGION: us-east-1
+      REPORT_DIR: actions-report/execution
+      PHASE: ${{ inputs.phase || 'infra' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Validate dispatch and configuration
+        id: gate
+        run: python scripts/environment-actions/pipeline.py gate --phase "$PHASE"
+      - name: Package persistent recovery code
+        run: python scripts/environment-actions/package_recovery.py
+      - uses: aws-actions/configure-aws-credentials@v4
+        id: aws
+        with:
+          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-${{ env.EXECUTOR_ROLE }}
+          role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          allowed-account-ids: '446517826146'
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+      - name: Inspect AWS contracts and capacity
+        if: env.EXECUTOR_ROLE == 'provision'
+        env:
+          REPORT_DIR: actions-report/preflight
+          PREFLIGHT_SCOPE: infra
+          PREFLIGHT_INTENT: inspect
+        run: node scripts/environment-actions/control.mjs preflight
+      - name: Produce the reviewed plan without applying
+        id: plan
+        run: python scripts/environment-actions/pipeline.py plan --phase "$PHASE"
+      - uses: actions/upload-artifact@v4
+        if: ${{ success() }}
+        with:
+          name: approved-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            actions-report/execution/plan.json
+            actions-report/execution/approved-plan.enc
+          if-no-files-found: error
+          retention-days: 7
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: plan
+        run: python scripts/environment-actions/finalize.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: plan-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          if-no-files-found: error
+          retention-days: 7

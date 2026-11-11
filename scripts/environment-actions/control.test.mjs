@@ -9,7 +9,7 @@ import { reviewPlan, validateInputs } from './bootstrap.mjs';
 
 const config = JSON.parse(fs.readFileSync(path.join(root, 'phase4/environments/actions-first.json')));
 const environment = { GITHUB_REPOSITORY: config.repository, GITHUB_REF: 'refs/heads/homolog', GITHUB_EVENT_NAME: 'workflow_dispatch' };
-const catalog = { enabled: true, aws_account_id: config.account, backend_bucket: 'approved-backend' };
+const catalog = { enabled: true, aws_account_id: config.account, aws_region: config.region, backend_bucket: 'approved-backend' };
 
 async function withReport(operation, action) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phase4-actions-'));
@@ -176,8 +176,8 @@ test('failed pods trigger bounded current and previous log collection without le
   });
 });
 
-test('Up and Destroy share a lock and never cancel the running operation', () => {
-  for (const name of ['environment-up.yml', 'environment-destroy.yml', 'environment-bootstrap-identities.yml', 'environment-verify-recovery.yml']) {
+test('Plan, Deploy and Destroy share a lock and never cancel the running operation', () => {
+  for (const name of ['plan.yml', 'deploy.yml', 'destroy.yml']) {
     const workflow = fs.readFileSync(path.join(root, '.github/workflows', name), 'utf8');
     assert.match(workflow, /group: phase4-demo-a-mutation/);
     assert.match(workflow, /cancel-in-progress: false/);
@@ -187,9 +187,47 @@ test('Up and Destroy share a lock and never cancel the running operation', () =>
   }
 });
 
-test('legacy has no auth, Terraform, AWS or destructive commands', () => {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci-cd.yml'), 'utf8');
-  assert.doesNotMatch(workflow, /terraform\s+(apply|destroy|plan)|id-token:|configure-aws|kubectl|helm/);
+test('only the three operational workflows remain actionable', () => {
+  const workflows = fs.readdirSync(path.join(root, '.github/workflows')).filter(name => /\.ya?ml$/.test(name)).sort();
+  assert.deepEqual(workflows, ['deploy.yml', 'destroy.yml', 'plan.yml']);
+  for (const name of workflows) {
+    const workflow = fs.readFileSync(path.join(root, '.github/workflows', name), 'utf8');
+    assert.doesNotMatch(workflow, /PHASE4_(PLAN|READONLY|EXECUTION)_APPROVED|workflow_call:|uses: \.\/\.github\/workflows\//);
+  }
+});
+
+test('planning gate authorizes only infra planning without enabling apply', () => {
+  const disabledCatalog = { ...catalog, enabled: false };
+  const disabledConfiguration = { ...config, execution_enabled: false };
+  const runtime = { approved: false, account: config.account, region: config.region, environment: 'demo-a',
+    backend_bucket: catalog.backend_bucket, preflight_authorization: { account: config.account, region: config.region,
+      scope: 'infra', valid_until: Date.now() / 1000 + 3600, reference: 'offline-backend-review', backend_permissions_reviewed: true } };
+  const planning = { ...environment, EXECUTION_MODE: 'plan', PHASE: 'infra', PHASE4_PLAN_APPROVED: 'true' };
+  operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog, planning, runtime);
+  for (const override of [{ PHASE4_PLAN_APPROVED: 'false' }, { PHASE: 'platform' }, { PLAN_HASH: 'a'.repeat(64) }]) {
+    assert.throws(() => operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog,
+      { ...planning, ...override }, runtime));
+  }
+  assert.throws(() => operationalGate('up', 'UP demo-a', disabledConfiguration, disabledCatalog,
+    { ...planning, EXECUTION_MODE: 'apply', PLAN_HASH: '' }, runtime), /APPROVED_PLAN_HASH_REQUIRED/);
+  assert.equal(disabledCatalog.enabled, false);
+  assert.equal(runtime.approved, false);
+});
+
+test('Plan only plans; Deploy consumes a saved artifact and Destroy retains both least-privilege roles', () => {
+  const plan = fs.readFileSync(path.join(root, '.github/workflows/plan.yml'), 'utf8');
+  assert.ok(plan.includes('PREFLIGHT_INTENT: inspect'));
+  assert.ok(plan.includes('PREFLIGHT_SCOPE: infra'));
+  assert.ok(plan.includes('pipeline.py plan'));
+  assert.doesNotMatch(plan, /pipeline\.py (deploy|destroy|teardown|close)|terraform apply|confirmation:/);
+  const deploy = fs.readFileSync(path.join(root, '.github/workflows/deploy.yml'), 'utf8');
+  assert.ok(deploy.includes('actions/download-artifact@v4'));
+  assert.ok(deploy.includes('PROTECTED_ENVIRONMENT:'));
+  assert.ok(deploy.includes('--hash "$PLAN_HASH"'));
+  const destroy = fs.readFileSync(path.join(root, '.github/workflows/destroy.yml'), 'utf8');
+  assert.ok(destroy.includes('DESTROY demo-a'));
+  assert.ok(destroy.includes("always() && needs.teardown.result != 'cancelled'"));
+  for (const role of ['provision', 'destroy']) assert.ok(destroy.includes(`EXECUTOR_ROLE: ${role}`));
 });
 
 test('bootstrap requires approved boundaries and excludes secret-bearing input variables', () => {

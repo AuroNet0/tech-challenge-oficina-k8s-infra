@@ -42,7 +42,7 @@ class Scope:
     ready: bool
 
     @classmethod
-    def resolve(cls, catalog, environment, account, region, observed_account, observed_region, revision):
+    def resolve(cls, catalog, environment, account, region, observed_account, observed_region, revision, approval_source='catalog'):
         check(catalog['schema_version'] == 1 and environment in ('demo-a', 'demo-b'))
         settings = catalog['environments'][environment]
         check(re.fullmatch('[0-9a-f]{40}', revision) is not None)
@@ -54,7 +54,10 @@ class Scope:
         check(type(settings['enabled']) is bool)
         for stack in ('infra', 'platform', 'edge'):
             check(settings['state_keys'][stack] == f'phase4/environments/{environment}/{stack}.tfstate')
-        ready = settings['enabled'] and settings['aws_account_id'] == account and bool(re.fullmatch('[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', settings['backend_bucket'] or ''))
+        check(approval_source in ('catalog', 'github-environment'), 'APPROVAL_SOURCE_REJECTED')
+        authorized = settings['enabled'] or (approval_source == 'github-environment' and environment == 'demo-a'
+                                            and account == '446517826146' and region == 'us-east-1')
+        ready = authorized and settings['aws_account_id'] == account and bool(re.fullmatch('[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', settings['backend_bucket'] or ''))
         return cls(environment, f'tc-oficina-p4-{environment}', account, region, revision, ready)
 
     def require_ready(self):

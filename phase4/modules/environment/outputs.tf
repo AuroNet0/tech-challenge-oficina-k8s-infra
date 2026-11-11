@@ -7,6 +7,7 @@ output "contract" {
     name_prefix    = local.name_prefix
     tags           = local.tags
     ready          = local.ready
+    planning_ready = local.planning_ready
     backend = {
       bucket              = local.environment.backend_bucket
       region              = local.environment.aws_region
