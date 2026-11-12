@@ -96,7 +96,7 @@ jobs:
             [[ "$caller_arn" == "arn:aws:sts::${account_id}:assumed-role/${role_name}/"* ]]
             jq -n \
               --arg account_id "$account_id" \
-              --arg revision "$GITHUB_SHA" \
+              --arg revision "0000000000000000000000000000000000000000" \
               --arg role_arn "$AWS_ROLE_ARN" \
               '{environment_id: "demo-a", aws_region: "us-east-1",
                 aws_account_id: $account_id, git_revision: $revision,
