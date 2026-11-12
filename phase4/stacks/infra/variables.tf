@@ -66,16 +66,16 @@ variable "kubernetes_version" {
 }
 
 variable "eks_public_access_cidrs" {
-  description = "Lista opcional de IPv4 /32 administrativos; vazia mantem endpoint somente privado. Runner deve ter caminho de rede aprovado."
+  description = "Lista opcional de IPv4 /32 administrativos ou 0.0.0.0/0 para o workflow infra; vazia mantem endpoint somente privado."
   type        = list(string)
   default     = []
   nullable    = false
 
   validation {
     condition = alltrue([
-      for cidr in var.eks_public_access_cidrs : can(cidrnetmask(cidr)) && can(regex("/32$", cidr)) && !startswith(cidr, "0.0.0.0/")
+      for cidr in var.eks_public_access_cidrs : cidr == "0.0.0.0/0" || (can(cidrnetmask(cidr)) && can(regex("/32$", cidr)) && !startswith(cidr, "0.0.0.0/"))
     ])
-    error_message = "Acesso publico administrativo aceita somente IPv4 /32 explicitos; nunca 0.0.0.0."
+    error_message = "Acesso publico aceita IPv4 /32 administrativos ou 0.0.0.0/0."
   }
 }
 

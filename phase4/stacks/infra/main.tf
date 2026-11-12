@@ -40,7 +40,7 @@ resource "terraform_data" "environment_guard" {
   lifecycle {
     precondition {
       condition = (
-        (local.environment.ready || local.planning_allowed) &&
+        local.environment.planning_ready &&
         local.environment.tags.Phase == "4" &&
         local.environment.tags.Lifecycle == "ephemeral" &&
         local.environment.tags.Shared == "false"
@@ -55,7 +55,7 @@ output "environment_contract" {
   value       = local.environment
 
   precondition {
-    condition     = module.environment.contract.ready || local.planning_allowed
-    error_message = "Operacao bloqueada: ambiente desabilitado ou conta/backend nao aprovados no catalogo."
+    condition     = module.environment.contract.planning_ready
+    error_message = "Operacao bloqueada: identidade ou backend invalidos no catalogo."
   }
 }
