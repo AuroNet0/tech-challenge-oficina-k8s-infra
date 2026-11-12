@@ -41,7 +41,7 @@ jobs:
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       INFRA_ACTION: ${{ inputs.action }}
       INFRA_CONFIRM: ${{ inputs.confirm }}
-      INFRA_LOG: ${{ runner.temp }}/infra.log
+      INFRA_LOG: /tmp/infra.log
     steps:
       - uses: actions/checkout@v4
         with:
@@ -192,6 +192,6 @@ jobs:
           name: infra-${{ inputs.action }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             phase4/stacks/infra/plan.txt
-            ${{ runner.temp }}/infra.log
+            /tmp/infra.log
           if-no-files-found: warn
           retention-days: 7
