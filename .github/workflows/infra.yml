@@ -54,21 +54,12 @@ jobs:
             echo '::group::Check operation and confirmation'
             case "$INFRA_ACTION" in
               plan|apply) ;;
-              destroy) test "$INFRA_CONFIRM" = DESTROY ;;
+              destroy) test "$INFRA_CONFIRM" = DESTROY || { echo '::error::Digite DESTROY no campo confirm'; exit 1; } ;;
               *) echo '::error::Unknown operation'; exit 1 ;;
             esac
             test -n "$AWS_ROLE_ARN" || { echo '::error::Configure repository variable AWS_ROLE_ARN'; exit 1; }
             echo '::endgroup::'
           } 2>&1 | tee -a "$INFRA_LOG"
-
-      - name: Debug OIDC subject
-        run: |
-          set -euo pipefail
-          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
-          payload=$(cut -d. -f2 <<< "$token" | tr '_-' '/+')
-          case $(( ${#payload} % 4 )) in 2) payload="$payload==";; 3) payload="$payload=";; esac
-          base64 -d <<< "$payload" | jq '{sub, aud, repository}'
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -102,7 +93,8 @@ jobs:
                 aws_account_id: $account_id, git_revision: $revision,
                 availability_zones: ["us-east-1a", "us-east-1b"],
                 eks_admin_role_arn: $role_arn,
-                eks_public_access_cidrs: ["0.0.0.0/0"]}' > tfvars.json
+                eks_public_access_cidrs: ["0.0.0.0/0"],
+                node_count: 2}' > tfvars.json
             echo '::endgroup::'
           } 2>&1 | tee -a "$INFRA_LOG"
 
