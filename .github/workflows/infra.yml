@@ -161,6 +161,19 @@ jobs:
             echo '::endgroup::'
           } 2>&1 | tee -a "$INFRA_LOG"
 
+      - name: Verify cluster access
+        if: inputs.action == 'apply'
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Verify cluster access'
+            aws eks update-kubeconfig --name tc-oficina-p4-demo-a --region us-east-1
+            kubectl get nodes -o wide
+            kubectl auth can-i '*' '*' --all-namespaces
+            kubectl get pods -A
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
       - name: Terraform destroy
         if: inputs.action == 'destroy'
         run: |
