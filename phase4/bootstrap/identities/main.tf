@@ -65,13 +65,23 @@ resource "aws_iam_role" "executor" {
   max_session_duration = 3600
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
+    Statement = concat([{
       Effect = "Allow", Principal = { Federated = local.oidc_provider }, Action = "sts:AssumeRoleWithWebIdentity"
       Condition = { StringEquals = {
         "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         "token.actions.githubusercontent.com:sub" = local.subjects[each.key]
       } }
-    }]
+      }], var.complete_workflow_delegation_enabled && each.key != "destroy" ? [{
+      Sid    = "CompleteWorkflowDelegation"
+      Effect = "Allow", Principal = { Federated = local.oidc_provider }, Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = { StringEquals = {
+        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        "token.actions.githubusercontent.com:sub" = concat(
+          ["repo:${local.repository}:environment:phase4-${var.environment_id}-bootstrap"],
+          each.key == "provision" ? [local.subjects.destroy] : []
+        )
+      } }
+    }] : [])
   })
   depends_on = [terraform_data.guard]
   lifecycle { prevent_destroy = true }
@@ -92,6 +102,8 @@ resource "aws_iam_role_policy" "recovery" {
   name = "close-selected-endpoint"
   policy = jsonencode({ Version = "2012-10-17", Statement = [
     { Sid = "ObserveSelectedCluster", Effect = "Allow", Action = ["eks:DescribeCluster", "eks:DescribeUpdate", "eks:ListUpdates"], Resource = local.cluster },
+    { Sid = "ObserveBootstrapAccess", Effect = "Allow", Action = "eks:ListAssociatedAccessPolicies", Resource = "arn:aws:eks:${local.region}:${local.account}:access-entry/${local.prefix}/role/${local.account}/${local.prefix}-provision/*" },
+    { Sid = "RevokeTemporaryBootstrap", Effect = "Allow", Action = "eks:DisassociateAccessPolicy", Resource = "arn:aws:eks:${local.region}:${local.account}:access-entry/${local.prefix}/role/${local.account}/${local.prefix}-provision/*", Condition = { ArnEquals = { "eks:principalArn" = "arn:aws:iam::${local.account}:role/${local.prefix}-provision", "eks:policyArn" = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" } } },
     {
       Sid       = "CloseOnly", Effect = "Allow", Action = "eks:UpdateClusterConfig", Resource = local.cluster
       Condition = { Bool = { "eks:endpointPublicAccess" = "false", "eks:endpointPrivateAccess" = "true" } }

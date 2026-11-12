@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,7 +124,22 @@ class Report:
                 entry['failed_resource'] = error.resource
                 if error.resource:
                     entry['resource'] = error.resource
-            entry['next_action'] = 'Inspect this phase and its resource; correct the reported cause and rerun. Backend and inventory are preserved.'
+            else:
+                entry['detail'] = dict(exception_type=type(error).__name__,
+                    frames=[dict(file=Path(frame.filename).name, line=frame.lineno, function=frame.name)
+                        for frame in traceback.extract_tb(error.__traceback__)[-8:]])
+            corrections = {
+                'ACCESS_DENIED': 'Confira a action IAM e o ARN no diagnóstico; atualize somente a policy/boundary da role executora.',
+                'AccessDenied': 'Confira a action IAM e o ARN no diagnóstico; atualize somente a policy/boundary da role executora.',
+                'STATE_LOCK_FAILED': 'Identifique o proprietário do lock S3 e aguarde sua execução; não remova um lock ativo.',
+                'AWS_QUOTA_EXCEEDED': 'Confira a quota indicada em us-east-1; reduza o escopo ou solicite ajuste sem mudar o plano da conta.',
+                'AWS_CAPACITY_UNAVAILABLE': 'Confira capacidade nas zonas e tipos aprovados; alterações de capacidade exigem novo Plan.',
+                'READINESS_FAILED': 'Confira eventos, PVCs, logs atuais/anteriores e conexão com os bancos e RabbitMQ.',
+                'MIGRATION_FAILED': 'Confira o Job, versão Flyway e grants do banco indicado; preserve o state e o banco.',
+                'AWS_E2E_TRANSITION_TIMEOUT': 'Confira a última transição da Saga e o checkout de teste; não simule confirmação financeira.',
+            }
+            entry['message_pt'] = 'Falha na etapa ' + phase + ': ' + reason
+            entry['next_action'] = corrections.get(reason, 'Confira o recurso e a causa original nesta etapa; corrija o requisito e retome. State e inventário são preservados.')
             raise
         finally:
             entry['duration_ms'] = round((time.monotonic() - started) * 1000)
@@ -131,7 +147,8 @@ class Report:
             self.write()
 
     def write(self):
-        self.data['result'] = 'FAIL' if any(item['status'] == 'FAIL' for item in self.data['checks']) else 'PASS'
+        statuses = {item['status'] for item in self.data['checks']}
+        self.data['result'] = 'FAIL' if 'FAIL' in statuses else 'BLOCKED' if 'BLOCKED' in statuses else 'PASS'
         (self.directory / 'report.json').write_text(json.dumps(self.data, indent=2), encoding='utf-8')
         rows = ['# Environment executor: ' + self.data['result'],
                 f"Run {self.data['run_id']}; revision {self.data['revision']}", '',
@@ -240,7 +257,7 @@ class Driver:
             resource = next((str(arguments[key]) for key in ('ResourceArn', 'RoleName', 'Bucket', 'SecretId', 'name', 'Key') if key in arguments), service)
             raise Failure(code_of(error), f'{service}:{operation}', dict(request_id=metadata.get('RequestId'),
                 http_status=metadata.get('HTTPStatusCode'), aws_action=service + ':' + operation,
-                resource=resource)) from None
+                resource=resource, original_reason=safe_diagnostic(getattr(error, 'response', {}).get('Error', {}).get('Message', '')))) from None
 
     def items(self, service, operation, result, **arguments):
         client = self.client(service)
@@ -261,7 +278,7 @@ class Driver:
         stdout = result.stdout.decode(errors='replace') if isinstance(result.stdout, bytes) else result.stdout or ''
         stderr = result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr or ''
         if result.returncode:
-            context = dict(exit_code=result.returncode)
+            context = dict(exit_code=result.returncode, operation=arguments[0])
             if arguments[0] == 'terraform':
                 diagnostics = []
                 records = []
@@ -416,6 +433,10 @@ class Driver:
                 edge = self.outputs('edge')
                 if edge.get('jwt_contract'):
                     values['jwt'] = edge['jwt_contract']
+                    payment = values.get('mercado_pago', {})
+                    if all(payment.get(name + '_url') for name in ('success', 'failure', 'pending')):
+                        values['mercado_pago'] = dict(payment, enabled=True,
+                            notification_url=edge['jwt_contract']['issuer'] + '/api/v1/webhooks/mercado-pago')
                 receipts = self.journal['receipts']
                 for flag, receipt in dict(bootstrap_completed='bootstrap', secrets_delivered='secrets',
                         auth_image_verified='release', auth_migration_completed='databases',
@@ -433,11 +454,12 @@ class Driver:
                     values['auth_release'] = self.journal['auth_release']
                 receipts = self.journal['receipts']
                 values.update(publish_auth=profile in ('edge-auth', 'edge-alb', 'edge-business'),
-                    prepare_alb=profile in ('edge-alb', 'edge-business'), publish_business=profile == 'edge-business', publish_webhook=False)
+                    prepare_alb=profile in ('edge-alb', 'edge-business'), publish_business=profile == 'edge-business',
+                    publish_webhook=profile == 'edge-business')
                 mapping = dict(artifact_verified='release', bootstrap_layer_verified='release', secrets_verified='secrets',
                     bootstrap_completed='bootstrap', auth_migration_completed='databases', controller_ready='controller',
                     workloads_ready='health', network_policy_enforced='network-policy', pki_valid_for_operation='secrets',
-                    jwks_ready='jwks', targets_healthy='alb', listener_verified='alb')
+                    jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='mercado-pago')
                 values['readiness'] = {flag: receipts.get(receipt, {}).get('verified') is True for flag, receipt in mapping.items()}
                 if receipts.get('alb', {}).get('listener_arn'):
                     values['alb_listener_arn'] = receipts['alb']['listener_arn']
@@ -458,7 +480,7 @@ class Driver:
             mapping = dict(artifact_verified='release', bootstrap_layer_verified='release', secrets_verified='secrets',
                 bootstrap_completed='bootstrap', auth_migration_completed='databases', controller_ready='controller',
                 workloads_ready='health', network_policy_enforced='network-policy', pki_valid_for_operation='secrets',
-                jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='e2e')
+                jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='mercado-pago')
             for flag, enabled in values.get('readiness', {}).items():
                 require(flag in mapping and (not enabled or receipts.get(mapping[flag], {}).get('verified') is True), 'LIVE_EVIDENCE_REQUIRED', flag)
                 if enabled:
@@ -536,14 +558,50 @@ class Driver:
         function = f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{PREFIX}-endpoint-{purpose}'
         result = self.api('lambda', 'invoke', FunctionName=function, InvocationType='RequestResponse', Payload=canonical(payload))
         body = json.loads(result['Payload'].read())
-        require(not result.get('FunctionError'), 'ENDPOINT_RECOVERY_REJECTED', function)
+        if result.get('FunctionError'):
+            raise Failure('ENDPOINT_RECOVERY_REJECTED', function,
+                          dict(error_type=safe_diagnostic(str(body.get('errorType', 'LambdaError'))),
+                               message=safe_diagnostic(str(body.get('errorMessage', 'Endpoint operation failed')))))
         return body
 
+    def recovery_ready(self, opening=True):
+        from package_recovery import package_bytes
+        checksum = base64.b64encode(bytes.fromhex(digest(package_bytes()))).decode()
+        for purpose in ('broker', 'recovery'):
+            function = f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{PREFIX}-endpoint-{purpose}'
+            observed = self.api('lambda', 'get_function_configuration', FunctionName=function)
+            settings = json.loads(observed.get('Environment', {}).get('Variables', {}).get('RECOVERY_CONFIG', '{}'))
+            require(observed.get('State') == 'Active' and observed.get('LastUpdateStatus') == 'Successful'
+                    and observed.get('Role') == f'arn:aws:iam::{ACCOUNT}:role/{PREFIX}-endpoint-{purpose}'
+                    and observed.get('CodeSha256') == settings.get('code_sha256') == checksum
+                    and settings.get('cluster_arn') == f'arn:aws:eks:{REGION}:{ACCOUNT}:cluster/{PREFIX}'
+                    and settings.get('bootstrap_principal_arn') == f'arn:aws:iam::{ACCOUNT}:role/{PREFIX}-provision'
+                    and settings.get('account') == ACCOUNT and settings.get('region') == REGION
+                    and settings.get('environment_id') == 'demo-a', 'RECOVERY_INSTALLATION_NOT_READY', function)
+            if opening:
+                require(settings.get('enabled') is True and settings.get('recovery_verified') is True,
+                        'BROKER_OPENING_DISABLED', function)
+        schedule = self.api('scheduler', 'get_schedule', Name='reconcile', GroupName=PREFIX + '-recovery')
+        require(schedule.get('State') == 'ENABLED'
+                and schedule.get('Target', {}).get('Arn') == f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:{PREFIX}-endpoint-recovery',
+                'INDEPENDENT_RECOVERY_SCHEDULE_REQUIRED')
+
+    def bootstrap_permissions(self):
+        checks = [('create', 'customresourcedefinitions.apiextensions.k8s.io'),
+                  ('create', 'clusterroles.rbac.authorization.k8s.io'),
+                  ('bind', 'clusterroles.rbac.authorization.k8s.io'),
+                  ('escalate', 'clusterroles.rbac.authorization.k8s.io'),
+                  ('create', 'clusterrolebindings.rbac.authorization.k8s.io')]
+        for verb, resource in checks:
+            allowed = self.kubectl(['auth', 'can-i', verb, resource]).strip()
+            require(allowed == 'yes', 'KUBERNETES_BOOTSTRAP_FORBIDDEN', verb + ':' + resource)
+
     @contextlib.contextmanager
-    def kubernetes(self):
+    def kubernetes(self, privileged=False):
         cluster = self.cluster()
         require(cluster['status'] == 'ACTIVE', 'CLUSTER_NOT_ACTIVE')
         if self.config.get('endpoint', {}).get('mode') == 'existing-private':
+            require(not privileged, 'BOOTSTRAP_REQUIRES_DURABLE_BROKER')
             require(os.getenv('RUNNER_ENVIRONMENT') == 'self-hosted' and not cluster['resourcesVpcConfig']['endpointPublicAccess']
                 and cluster['resourcesVpcConfig']['endpointPrivateAccess'], 'PRIVATE_RUNNER_NOT_PROVEN')
             os.environ['KUBECONFIG'] = str(Path(self.temporary.name) / 'kubeconfig')
@@ -568,15 +626,25 @@ class Driver:
         lease = self.invoke('broker', {'prepare': dict(github_run_id=os.environ['GITHUB_RUN_ID'], revision=os.environ['GITHUB_SHA'],
             github_run_attempt=os.getenv('GITHUB_RUN_ATTEMPT', '1'), observed_ip=observed_ip, duration_seconds=1800)})
         self.lease = lease['lease_id']
-        self.receipt('endpoint-lease', dict(lease_id=self.lease, expires_at=lease['expires_at']))
         original_error = None
         try:
+            (self.report.directory / 'endpoint-lease.json').write_bytes(canonical(dict(lease_id=self.lease,
+                run_id=os.environ['GITHUB_RUN_ID'], revision=os.environ['GITHUB_SHA'])))
+            self.receipt('endpoint-lease', dict(lease_id=self.lease, expires_at=lease['expires_at']))
             self.invoke('broker', {'open': self.lease})
             self.wait(lambda: self.cluster()['status'] == 'ACTIVE' and self.cluster()['resourcesVpcConfig']['endpointPublicAccess'], 'ENDPOINT_OPEN_TIMEOUT', attempts=40)
             network = self.cluster()['resourcesVpcConfig']
             require(network['endpointPrivateAccess'] and network['publicAccessCidrs'] == [observed_ip + '/32'], 'ENDPOINT_CIDR_MISMATCH')
             os.environ['KUBECONFIG'] = str(Path(self.temporary.name) / 'kubeconfig')
             self.run(['aws', 'eks', 'update-kubeconfig', '--region', REGION, '--name', PREFIX])
+            if privileged:
+                require(getattr(self, 'authorization_source', None) == 'github-environment'
+                        and os.getenv('EXECUTOR_ROLE') == 'provision', 'BOOTSTRAP_NOT_AUTHORIZED')
+                with self.report.phase('temporary-kubernetes-bootstrap', PREFIX):
+                    result = self.invoke('broker', {'bootstrap': self.lease})
+                    require(result.get('bootstrap_elevation') is True and result.get('lease_id') == self.lease,
+                            'BOOTSTRAP_POLICY_NOT_ASSOCIATED')
+                    self.wait(lambda: self.kubernetes_authorized(), 'KUBERNETES_BOOTSTRAP_FORBIDDEN', attempts=12, delay=5)
             self.run(['kubectl', 'get', '--raw=/readyz', '--request-timeout=15s'])
             yield
         except BaseException as error:
@@ -593,6 +661,15 @@ class Driver:
             except Exception:
                 if original_error is None:
                     raise
+
+    def kubernetes_authorized(self):
+        try:
+            self.bootstrap_permissions()
+            return True
+        except Failure as error:
+            if error.code not in ('KUBERNETES_BOOTSTRAP_FORBIDDEN', 'COMMAND_FAILED', 'ACCESS_DENIED'):
+                raise
+            return False
 
     def close_endpoint(self):
         lease_id = self.lease or self.journal['receipts'].get('endpoint-lease', {}).get('lease_id')

@@ -16,6 +16,7 @@ locals {
     code_sha256                = filebase64sha256(var.package_path)
     enabled                    = var.opening_approved && var.recovery_verification_approved
     recovery_verified          = var.recovery_verification_approved
+    bootstrap_principal_arn    = "arn:aws:iam::${var.account}:role/${local.prefix}-provision"
     reconcile_interval_minutes = var.reconcile_interval_minutes
   }
 }
@@ -124,9 +125,11 @@ locals {
 
 resource "aws_iam_role_policy" "broker" {
   role = aws_iam_role.broker.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = concat(local.broker_statements, var.opening_approved && var.recovery_verification_approved ? [
+  policy = jsonencode({ Version = "2012-10-17", Statement = concat(local.broker_statements, jsondecode(var.opening_approved && var.recovery_verification_approved ? jsonencode([
+    { Effect = "Allow", Action = "eks:ListAssociatedAccessPolicies", Resource = "arn:aws:eks:${var.region}:${var.account}:access-entry/${local.prefix}/role/${var.account}/${local.prefix}-provision/*" },
+    { Effect = "Allow", Action = "eks:AssociateAccessPolicy", Resource = "arn:aws:eks:${var.region}:${var.account}:access-entry/${local.prefix}/role/${var.account}/${local.prefix}-provision/*", Condition = { StringEquals = { "eks:accessScope" = "cluster" }, ArnEquals = { "eks:principalArn" = "arn:aws:iam::${var.account}:role/${local.prefix}-provision", "eks:policyArn" = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" } } },
     { Effect = "Allow", Action = "eks:UpdateClusterConfig", Resource = var.cluster_arn, Condition = { Bool = { "eks:endpointPrivateAccess" = "true" } } }
-  ] : []) })
+  ]) : "[]")) })
 }
 
 resource "aws_lambda_function" "runtime" {

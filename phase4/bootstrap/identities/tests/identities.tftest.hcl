@@ -36,9 +36,34 @@ run "persistent_oidc_and_no_opening" {
     error_message = "PassRole deve ser exato e destroy deve negar sem inventario aprovado."
   }
   assert {
-    condition     = jsondecode(output.policy_documents.recovery).Statement[1].Condition.Bool["eks:endpointPublicAccess"] == "false" && jsondecode(output.policy_documents.recovery).Statement[1].Resource == "arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a"
+    condition     = alltrue([for statement in jsondecode(output.policy_documents.recovery).Statement : statement.Condition.Bool["eks:endpointPublicAccess"] == "false" && statement.Resource == "arn:aws:eks:us-east-1:446517826146:cluster/tc-oficina-p4-demo-a" if statement.Sid == "CloseOnly"])
     error_message = "Recuperacao deve somente fechar cluster selecionado."
   }
+}
+
+run "complete_workflow_uses_only_existing_protected_immutable_environments" {
+  command = plan
+  variables { complete_workflow_delegation_enabled = true }
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role.executor["destroy"].assume_role_policy).Statement) == 1 &&
+      jsondecode(aws_iam_role.executor["deploy"].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == local.subjects.deploy &&
+      toset(jsondecode(aws_iam_role.executor["deploy"].assume_role_policy).Statement[1].Condition.StringEquals["token.actions.githubusercontent.com:sub"]) == toset(["repo:AuroNet0@128399450/tech-challenge-oficina-k8s-infra@1355187946:environment:phase4-demo-a-bootstrap"]) &&
+      toset(jsondecode(aws_iam_role.executor["provision"].assume_role_policy).Statement[1].Condition.StringEquals["token.actions.githubusercontent.com:sub"]) == toset(["repo:AuroNet0@128399450/tech-challenge-oficina-k8s-infra@1355187946:environment:phase4-demo-a-bootstrap", local.subjects.destroy]) &&
+      !strcontains(aws_iam_role.executor["deploy"].assume_role_policy, ":ref:") &&
+      !strcontains(aws_iam_role.executor["deploy"].assume_role_policy, "*")
+    )
+    error_message = "Aprovacao unica deve delegar somente roles necessarias aos Environments existentes, sem ampliar destroy ou aceitar branch subjects/wildcards."
+  }
+}
+
+run "complete_workflow_rejects_classic_subjects" {
+  command = plan
+  variables {
+    complete_workflow_delegation_enabled = true
+    subject_format                       = "classic"
+  }
+  expect_failures = [var.complete_workflow_delegation_enabled]
 }
 
 run "blocked_without_installation_approval" {

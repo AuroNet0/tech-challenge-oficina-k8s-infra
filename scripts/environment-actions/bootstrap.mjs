@@ -11,9 +11,10 @@ const variableNames = new Set(['environment_id', 'aws_account_id', 'aws_region',
   'installation_approved', 'oidc_claims_verified', 'subject_format', 'workload_boundary_documents',
   'inventory', 'inventory_approved', 'destroy_confirmation', 'external_input_secrets', 'artifact_bucket_installation_approved',
   'recovery_installation_approved', 'recovery_package_path', 'recovery_alarm_topic_arn',
-  'recovery_reconcile_interval_minutes', 'recovery_opening_approved', 'recovery_verification_approved']);
+  'recovery_reconcile_interval_minutes', 'recovery_opening_approved', 'recovery_verification_approved', 'complete_workflow_delegation_enabled']);
 
 export function validateInputs(inputs) {
+  if (inputs.complete_workflow_delegation_enabled && inputs.subject_format !== 'immutable') throw new Error('COMPLETE_WORKFLOW_REQUIRES_IMMUTABLE_SUBJECTS');
   if (Object.keys(inputs).some(key => !variableNames.has(key)) || inputs.environment_id !== 'demo-a'
     || inputs.aws_account_id !== '446517826146' || inputs.aws_region !== 'us-east-1'
     || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(inputs.backend_bucket || '')

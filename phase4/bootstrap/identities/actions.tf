@@ -3,10 +3,10 @@ variable "external_input_secrets" {
   default = {}
   validation {
     condition = alltrue([for name, arn in var.external_input_secrets :
-      contains(["newrelic", "mercado-pago"], name) &&
+      contains(["newrelic", "mercado-pago", "e2e-fixture"], name) &&
       can(regex("^arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:/oficina/phase4/${var.environment_id}/inputs/${name}-[A-Za-z0-9]{6}$", arn))
     ])
-    error_message = "Somente ARNs exatos das entradas externas New Relic e Mercado Pago de teste."
+    error_message = "Somente ARNs exatos das entradas externas New Relic, Mercado Pago de teste e fixture E2E."
   }
 }
 
@@ -16,8 +16,11 @@ locals {
     Resource = "arn:aws:s3:::${var.backend_bucket}/${local.state_prefix}/operations/inventory.json"
   }]
   endpoint_clients = [{
-    Sid      = "InvokeSelectedEndpointBrokerAndRecovery", Effect = "Allow", Action = ["lambda:InvokeFunction"]
+    Sid      = "InvokeSelectedEndpointBrokerAndRecovery", Effect = "Allow", Action = ["lambda:InvokeFunction", "lambda:GetFunctionConfiguration"]
     Resource = [for name in ["broker", "recovery"] : "arn:aws:lambda:${local.region}:${local.account}:function:${local.prefix}-endpoint-${name}"]
+    }, {
+    Sid      = "InspectIndependentRecoverySchedule", Effect = "Allow", Action = "scheduler:GetSchedule"
+    Resource = "arn:aws:scheduler:${local.region}:${local.account}:schedule/${local.prefix}-recovery/reconcile"
   }]
   action_bucket_evidence = [{
     Sid      = "BackendConfigurationEvidence", Effect = "Allow"

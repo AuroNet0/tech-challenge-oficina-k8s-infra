@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from recovery import Blocked, EndpointLease, Pending, Store, recovery_handler
+from recovery import ADMIN_POLICY, Blocked, EndpointLease, Pending, Store, recovery_handler
 
 
 class AwsError(RuntimeError):
@@ -75,6 +75,7 @@ class RecoveryTests(unittest.TestCase):
             "code_sha256": "reviewed-code-hash"
         }
         self.dynamo = Dynamo()
+        self.config['bootstrap_principal_arn'] = 'arn:aws:iam::123456789012:role/tc-oficina-p4-demo-a-provision'
         self.store = Store(self.dynamo, "leases")
         self.network = {"endpointPublicAccess": False, "endpointPrivateAccess": True}
         self.cluster_value = {"arn": self.config["cluster_arn"], "status": "ACTIVE",
@@ -84,6 +85,7 @@ class RecoveryTests(unittest.TestCase):
         self.eks.describe_cluster.side_effect = lambda **arguments: {"cluster": copy.deepcopy(self.cluster_value)}
         self.eks.update_cluster_config.return_value = {"update": {"id": "update-123"}}
         self.eks.describe_update.return_value = {"update": {"status": "Successful"}}
+        self.eks.list_associated_access_policies.return_value = {'associatedAccessPolicies': []}
         self.schedules = {}
         self.scheduler = Mock()
         self.scheduler.create_schedule.side_effect = self.create_schedule
@@ -122,6 +124,64 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(request["resourcesVpcConfig"], {
             "endpointPublicAccess": True, "endpointPrivateAccess": True, "publicAccessCidrs": ["8.8.8.8/32"]})
         self.assertEqual(self.store.get(lease_id)["state"], "OPEN_REQUESTED")
+
+    def elevate(self):
+        lease_id = self.prepare()
+        self.service.open(lease_id)
+        self.network.update(endpointPublicAccess=True, publicAccessCidrs=['8.8.8.8/32'])
+        self.policies = []
+        self.eks.list_associated_access_policies.side_effect = lambda **arguments: {'associatedAccessPolicies': list(self.policies)}
+        self.eks.associate_access_policy.side_effect = lambda **arguments: self.policies.append({'policyArn': arguments['policyArn']})
+        self.eks.disassociate_access_policy.side_effect = lambda **arguments: self.policies.clear()
+        self.service.bootstrap(lease_id)
+        return lease_id
+
+    def test_bootstrap_admin_is_exact_and_revoked_after_runner_loss(self):
+        lease_id = self.elevate()
+        request = self.eks.associate_access_policy.call_args.kwargs
+        self.assertEqual(request['principalArn'], self.config['bootstrap_principal_arn'])
+        self.assertEqual(request['accessScope'], {'type': 'cluster'})
+        self.now += 1801
+        with self.assertRaises(Pending):
+            self.service.recover({'reconcile': True})
+        self.assertEqual(self.policies, [])
+        self.network['endpointPublicAccess'] = False
+        self.assertEqual(self.service.recover({'reconcile': True}), {'state': 'CLOSED'})
+
+    def test_failed_grant_is_journaled_for_independent_revocation(self):
+        lease_id = self.prepare()
+        self.service.open(lease_id)
+        self.network.update(endpointPublicAccess=True, publicAccessCidrs=['8.8.8.8/32'])
+        self.eks.associate_access_policy.side_effect = AwsError('AccessDeniedException')
+        with self.assertRaises(AwsError):
+            self.service.bootstrap(lease_id)
+        self.assertEqual(self.store.get(lease_id)['state'], 'ELEVATING')
+        self.assertTrue(self.store.get(lease_id)['bootstrap_elevation'])
+        with self.assertRaisesRegex(Pending, 'DISPATCH_FENCE_ACTIVE'):
+            self.service.close(lease_id)
+
+    def test_revocation_denial_still_closes_network_and_never_reports_closed(self):
+        lease_id = self.elevate()
+        self.now += 121
+        self.eks.disassociate_access_policy.side_effect = AwsError('AccessDeniedException')
+        with self.assertRaises(Pending):
+            self.service.close(lease_id)
+        self.assertFalse(self.eks.update_cluster_config.call_args.kwargs['resourcesVpcConfig']['endpointPublicAccess'])
+        self.network['endpointPublicAccess'] = False
+        with self.assertRaises(AwsError):
+            self.service.close(lease_id)
+        self.assertEqual(self.store.get(lease_id)['state'], 'CLOSING')
+
+    def test_bootstrap_without_open_lease_or_with_existing_policy_is_blocked(self):
+        lease_id = self.prepare()
+        with self.assertRaisesRegex(Blocked, 'BOOTSTRAP_LEASE_NOT_OPEN'):
+            self.service.bootstrap(lease_id)
+        self.service.open(lease_id)
+        self.network.update(endpointPublicAccess=True, publicAccessCidrs=['8.8.8.8/32'])
+        self.eks.list_associated_access_policies.return_value = {'associatedAccessPolicies': [{'policyArn': ADMIN_POLICY}]}
+        with self.assertRaisesRegex(Blocked, 'UNEXPECTED_BOOTSTRAP_ACCESS_POLICY'):
+            self.service.bootstrap(lease_id)
+        self.eks.associate_access_policy.assert_not_called()
 
     def test_rerun_attempt_has_new_lease_after_prior_attempt_closed(self):
         first = self.prepare(github_run_attempt="1")
@@ -405,18 +465,24 @@ class RecoveryTests(unittest.TestCase):
         self.now += 121
         self.assertEqual(self.service.close(lease_id), {"state": "CLOSED"})
 
-    def test_ambiguous_open_keeps_lock_even_when_currently_private(self):
+    def test_ambiguous_open_requires_fenced_successful_close_update(self):
         lease_id = self.prepare()
         self.eks.update_cluster_config.side_effect = AwsError("ServiceUnavailableException")
         with self.assertRaises(AwsError):
             self.service.open(lease_id)
         self.now += 901
-        with self.assertRaises(Pending):
+        with self.assertRaises(AwsError):
             self.service.close(lease_id)
         self.assertTrue(self.store.get(lease_id)["dispatch_uncertain"])
         self.assertEqual(self.store.get(lease_id)["state"], "CLOSING")
         with self.assertRaises(AwsError):
             self.prepare(github_run_id="54321")
+        self.eks.update_cluster_config.side_effect = None
+        with self.assertRaisesRegex(Pending, 'CLOSE_UPDATE_REQUESTED'):
+            self.service.close(lease_id)
+        self.assertTrue(self.store.get(lease_id)['dispatch_uncertain'])
+        self.assertEqual(self.service.close(lease_id), {'state': 'CLOSED'})
+        self.assertFalse(self.store.get(lease_id)['dispatch_uncertain'])
 
     def test_stale_write_cannot_overwrite_closing(self):
         lease_id = self.prepare()

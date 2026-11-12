@@ -1,0 +1,74 @@
+name: Complete executor
+description: Internal dependency executor
+inputs:
+  operation:
+    required: true
+    description: Executor operation
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup
+    - name: Package independent recovery
+      shell: bash
+      run: python scripts/environment-actions/package_recovery.py
+    - name: Locate reviewed Plan attempt
+      if: inputs.operation == 'deploy-all'
+      id: reference
+      shell: bash
+      run: |
+        python -c 'import os,sys; sys.path.insert(0,"scripts/environment-actions"); from pipeline import gh_json,REPOSITORY; run=gh_json([f"repos/{REPOSITORY}/actions/runs/"+os.environ["PLAN_RUN"]]); open(os.environ["GITHUB_OUTPUT"],"a").write("attempt="+str(run["run_attempt"])+"\n")'
+    - uses: actions/download-artifact@v4
+      if: inputs.operation == 'deploy-all'
+      with:
+        name: approved-plan-${{ env.PLAN_RUN }}-${{ steps.reference.outputs.attempt }}
+        run-id: ${{ env.PLAN_RUN }}
+        github-token: ${{ github.token }}
+        path: approved-plan
+    - uses: aws-actions/configure-aws-credentials@v4
+      id: aws
+      with:
+        role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-${{ env.EXECUTOR_ROLE }}
+        role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+        aws-region: us-east-1
+        allowed-account-ids: '446517826146'
+        role-duration-seconds: 3600
+        unset-current-credentials: true
+    - name: Read-only AWS preflight
+      if: inputs.operation == 'plan-part' && env.EXECUTOR_ROLE == 'provision'
+      shell: bash
+      env:
+        REPORT_DIR: actions-report/preflight
+        PREFLIGHT_SCOPE: infra
+        PREFLIGHT_INTENT: inspect
+      run: node scripts/environment-actions/control.mjs preflight
+    - name: Checkout immutable service sources
+      if: inputs.operation == 'deploy-all'
+      shell: bash
+      run: python scripts/environment-actions/checkout_sources.py
+    - name: Execute internal dependency block
+      shell: bash
+      env:
+        COMPLETE_OPERATION: ${{ inputs.operation }}
+      run: python scripts/environment-actions/complete.py "$COMPLETE_OPERATION"
+    - uses: actions/upload-artifact@v4
+      if: success() && inputs.operation == 'plan-part'
+      with:
+        name: complete-part-${{ env.EXECUTOR_ROLE }}
+        path: actions-report/execution/
+        overwrite: true
+        retention-days: 7
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      if: success() && inputs.operation == 'deploy-all'
+      with:
+        name: complete-progress
+        path: actions-report/execution/progress.json
+        overwrite: true
+        retention-days: 7
+        if-no-files-found: error
+    - name: Independently verify endpoint closure
+      if: always() && steps.aws.outcome == 'success' && inputs.operation == 'deploy-all'
+      shell: bash
+      env:
+        REPORT_DIR: actions-report/endpoint-close
+      run: python scripts/environment-actions/complete.py close

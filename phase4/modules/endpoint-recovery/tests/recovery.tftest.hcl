@@ -92,6 +92,16 @@ run "explicit_broker_activation_still_requires_runtime_probe" {
     recovery_verification_approved = true
   }
   assert {
+    condition = alltrue([for statement in jsondecode(aws_iam_role_policy.broker.policy).Statement :
+      statement.Resource == "arn:aws:eks:us-east-1:123456789012:access-entry/tc-oficina-p4-demo-a/role/123456789012/tc-oficina-p4-demo-a-provision/*" &&
+      statement.Condition.ArnEquals["eks:principalArn"] == "arn:aws:iam::123456789012:role/tc-oficina-p4-demo-a-provision" &&
+      statement.Condition.ArnEquals["eks:policyArn"] == "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy" &&
+      statement.Condition.StringEquals["eks:accessScope"] == "cluster"
+      if statement.Action == "eks:AssociateAccessPolicy"
+    ])
+    error_message = "Elevacao do broker deve restringir principal, policy e access entry exatos."
+  }
+  assert {
     condition = (local.config.enabled && alltrue([
       for statement in jsondecode(aws_iam_role_policy.broker.policy).Statement :
       statement.Resource == var.cluster_arn && statement.Condition.Bool["eks:endpointPrivateAccess"] == "true"

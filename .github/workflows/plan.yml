@@ -1,53 +1,20 @@
 name: Plan
 on:
-  workflow_dispatch:
-    inputs:
-      phase:
-        description: Phase or checkpoint to review and execute
-        type: choice
-        required: true
-        default: infra
-        options:
-          - infra
-          - release
-          - platform
-          - foundation
-          - controller
-          - secrets
-          - data
-          - platform-migration
-          - migrate
-          - edge
-          - edge-auth
-          - jwks
-          - platform-apps
-          - apps
-          - edge-alb
-          - ingress
-          - alb-check
-          - edge-business
-          - observability
-          - health
-          - e2e
-          - diagnose
-          - recovery-closed
-          - recovery-expiry
-          - iam-maintenance
-          - artifact-foundation
-          - recovery-foundation
-          - recovery-activate
+  workflow_dispatch: {}
 permissions:
   contents: read
   actions: read
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
 env:
-  SOURCE_AUTH_REVISION: ${{ vars.SOURCE_AUTH_REVISION }}
-  SOURCE_AUTH_CHECKS: ${{ vars.SOURCE_AUTH_CHECKS }}
-  SOURCE_OS_REVISION: ${{ vars.SOURCE_OS_REVISION }}
-  SOURCE_OS_CHECKS: ${{ vars.SOURCE_OS_CHECKS }}
-  SOURCE_EXECUTION_REVISION: ${{ vars.SOURCE_EXECUTION_REVISION }}
-  SOURCE_EXECUTION_CHECKS: ${{ vars.SOURCE_EXECUTION_CHECKS }}
-  SOURCE_BILLING_REVISION: ${{ vars.SOURCE_BILLING_REVISION }}
-  SOURCE_BILLING_CHECKS: ${{ vars.SOURCE_BILLING_CHECKS }}
+  PLAN_ARTIFACT_KEY: ${{ secrets.PLAN_ARTIFACT_KEY }}
+  SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
+  GH_TOKEN: ${{ github.token }}
+  AWS_EC2_METADATA_DISABLED: 'true'
+  AWS_REGION: us-east-1
+  REPORT_DIR: actions-report/execution
+  PHASE: complete
   NETWORK_PROBE_IMAGE: ${{ vars.NETWORK_PROBE_IMAGE }}
   MONGODB_IMAGE: ${{ vars.MONGODB_IMAGE }}
   RABBITMQ_IMAGE: ${{ vars.RABBITMQ_IMAGE }}
@@ -57,16 +24,17 @@ env:
   EKS_POD_IDENTITY_VERSION: ${{ vars.EKS_POD_IDENTITY_VERSION }}
   ALB_CERTIFICATE_ARN: ${{ vars.ALB_CERTIFICATE_ARN }}
   ALB_SERVER_NAME: ${{ vars.ALB_SERVER_NAME }}
+  AUTH_SIGNING_SECRET_ARN: ${{ vars.AUTH_SIGNING_SECRET_ARN }}
   MERCADO_PAGO_TEST_SECRET_ARN: ${{ vars.MERCADO_PAGO_TEST_SECRET_ARN }}
+  MERCADO_PAGO_SUCCESS_URL: ${{ vars.MERCADO_PAGO_SUCCESS_URL }}
+  MERCADO_PAGO_FAILURE_URL: ${{ vars.MERCADO_PAGO_FAILURE_URL }}
+  MERCADO_PAGO_PENDING_URL: ${{ vars.MERCADO_PAGO_PENDING_URL }}
   NEW_RELIC_SECRET_ARN: ${{ vars.NEW_RELIC_SECRET_ARN }}
   RECOVERY_ALARM_TOPIC_ARN: ${{ vars.RECOVERY_ALARM_TOPIC_ARN }}
-  SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
-concurrency:
-  group: phase4-demo-a-mutation
-  cancel-in-progress: false
+  E2E_FIXTURE_SECRET_ARN: ${{ vars.E2E_FIXTURE_SECRET_ARN }}
 jobs:
-  plan:
-    environment: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'phase4-demo-a-bootstrap' || 'phase4-demo-a-provision' }}
+  bootstrap:
+    environment: phase4-demo-a-bootstrap
     runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
     timeout-minutes: 90
     permissions:
@@ -74,51 +42,149 @@ jobs:
       actions: read
       id-token: write
     env:
-      EXECUTOR_ROLE: ${{ (startsWith(inputs.phase, 'recovery-') || inputs.phase == 'iam-maintenance' || inputs.phase == 'artifact-foundation') && 'bootstrap' || 'provision' }}
+      EXECUTOR_ROLE: bootstrap
+      PROTECTED_ENVIRONMENT: phase4-demo-a-bootstrap
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/complete
+        id: execute
+        with:
+          operation: plan-part
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: plan
+        run: |
+          if test -f scripts/environment-actions/finalize.py; then
+            python scripts/environment-actions/finalize.py
+          else
+            mkdir -p actions-report
+            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
+            printf '%s\n' 'Falha no checkout ou setup; abra o log da etapa. Nenhuma prontidão foi comprovada.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: bootstrap-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          retention-days: 7
+          if-no-files-found: error
+  provision:
+    environment: phase4-demo-a-provision
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: provision
+      PROTECTED_ENVIRONMENT: phase4-demo-a-provision
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/complete
+        id: execute
+        with:
+          operation: plan-part
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: plan
+        run: |
+          if test -f scripts/environment-actions/finalize.py; then
+            python scripts/environment-actions/finalize.py
+          else
+            mkdir -p actions-report
+            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
+            printf '%s\n' 'Falha no checkout ou setup; abra o log da etapa. Nenhuma prontidão foi comprovada.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: provision-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          retention-days: 7
+          if-no-files-found: error
+  runtime:
+    environment: phase4-demo-a-deploy
+    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      EXECUTOR_ROLE: deploy
+      PROTECTED_ENVIRONMENT: phase4-demo-a-deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/complete
+        id: execute
+        with:
+          operation: plan-part
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+          OPERATION: plan
+        run: |
+          if test -f scripts/environment-actions/finalize.py; then
+            python scripts/environment-actions/finalize.py
+          else
+            mkdir -p actions-report
+            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
+            printf '%s\n' 'Falha no checkout ou setup; abra o log da etapa. Nenhuma prontidão foi comprovada.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: runtime-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          retention-days: 7
+          if-no-files-found: error
+  complete:
+    needs: [bootstrap, provision, runtime]
+    runs-on: ubuntu-latest
+    env:
       OPERATION: plan
-      PLAN_ARTIFACT_KEY: ${{ secrets.PLAN_ARTIFACT_KEY }}
-      AWS_EC2_METADATA_DISABLED: 'true'
-      AWS_REGION: us-east-1
-      REPORT_DIR: actions-report/execution
-      PHASE: ${{ inputs.phase || 'infra' }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Validate dispatch and configuration
-        id: gate
-        run: python scripts/environment-actions/pipeline.py gate --phase "$PHASE"
-      - name: Package persistent recovery code
-        run: python scripts/environment-actions/package_recovery.py
-      - uses: aws-actions/configure-aws-credentials@v4
-        id: aws
+      - uses: actions/download-artifact@v4
         with:
-          role-to-assume: arn:aws:iam::446517826146:role/tc-oficina-p4-demo-a-${{ env.EXECUTOR_ROLE }}
-          role-session-name: ${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
-          aws-region: us-east-1
-          allowed-account-ids: '446517826146'
-          role-duration-seconds: 3600
-          unset-current-credentials: true
-      - name: Inspect AWS contracts and capacity
-        if: env.EXECUTOR_ROLE == 'provision'
-        env:
-          REPORT_DIR: actions-report/preflight
-          PREFLIGHT_SCOPE: infra
-          PREFLIGHT_INTENT: inspect
-        run: node scripts/environment-actions/control.mjs preflight
-      - name: Produce the reviewed plan without applying
-        id: plan
-        run: python scripts/environment-actions/pipeline.py plan --phase "$PHASE"
+          name: complete-part-bootstrap
+          path: plan-parts/bootstrap
+      - uses: actions/download-artifact@v4
+        with:
+          name: complete-part-provision
+          path: plan-parts/provision
+      - uses: actions/download-artifact@v4
+        with:
+          name: complete-part-deploy
+          path: plan-parts/deploy
+      - name: Seal complete manifest and saved plans
+        run: python scripts/environment-actions/complete.py assemble
       - uses: actions/upload-artifact@v4
-        if: ${{ success() }}
         with:
           name: approved-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            actions-report/execution/plan.json
-            actions-report/execution/approved-plan.enc
+          path: actions-report/execution/bundle.json
           if-no-files-found: error
           retention-days: 7
       - name: Consolidate diagnostics
@@ -127,11 +193,54 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           STEPS_JSON: ${{ toJSON(steps) }}
           OPERATION: plan
-        run: python scripts/environment-actions/finalize.py
+        run: |
+          if test -f scripts/environment-actions/finalize.py; then
+            python scripts/environment-actions/finalize.py
+          else
+            mkdir -p actions-report
+            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
+            printf '%s\n' 'Falha no checkout ou setup; abra o log da etapa. Nenhuma prontidão foi comprovada.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: complete-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: actions-report/
+          retention-days: 7
+          if-no-files-found: error
+  report:
+    if: ${{ always() }}
+    needs: [bootstrap, provision, runtime, complete]
+    runs-on: ubuntu-latest
+    env:
+      OPERATION: plan
+      JOB_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: all-diagnostics
+      - name: Consolidate diagnostics
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          if test -f scripts/environment-actions/complete_report.py; then
+            python scripts/environment-actions/complete_report.py
+          else
+            mkdir -p all-diagnostics
+            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > all-diagnostics/report.json
+          fi
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
           name: plan-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: actions-report/
+          path: all-diagnostics/
           if-no-files-found: error
           retention-days: 7

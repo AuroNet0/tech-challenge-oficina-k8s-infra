@@ -6,6 +6,12 @@ anteriores são históricos. Nenhum comando conectado deve ser executado localme
 
 ## Operação mínima
 
+Antes do primeiro Deploy Infra, seguir a [sequência de bootstrap e recuperação
+do EKS privado](private-eks-bootstrap.md). A fundação persistente de recovery deve
+estar instalada com o código atual. Infra não cria nem ativa essa fundação
+automaticamente; após criar o cluster, comprovar fechamento e ativar o broker
+pelos checkpoints existentes antes de qualquer instalação Kubernetes.
+
 1. **Plan**: escolher `infra`, branch `homolog`. Revisar `summary.md`,
    `plan.json` e o SHA256 publicado no resumo do run. Não precisa habilitar o
    catálogo, publicar aplicações ou fornecer Mercado Pago/New Relic.

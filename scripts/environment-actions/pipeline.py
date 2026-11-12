@@ -19,6 +19,8 @@ PHASES = ('infra', 'release', 'platform', 'foundation', 'controller', 'secrets',
 MAINTENANCE_PHASES = ('iam-maintenance', 'artifact-foundation', 'recovery-foundation', 'recovery-activate')
 DEPLOY_PHASES = ('release', 'secrets', 'data', 'migrate', 'apps', 'health', 'jwks', 'alb-check', 'e2e')
 REPOSITORY = 'AuroNet0/tech-challenge-oficina-k8s-infra'
+BOOTSTRAP_PROTOCOL = 'broker-lease-v1'
+PRIVILEGED_PHASES = ('foundation', 'controller', 'observability')
 
 
 def role_for(phase):
@@ -71,6 +73,7 @@ def configuration():
     require(all(catalog['state_keys'][stack] == f'phase4/environments/demo-a/{stack}.tfstate' for stack in STACKS),
             'STATE_KEY_REJECTED')
     repositories = dict(auth='auth', os='os-service', execution='execution-service', billing='billing-service')
+    config['services'] = json.loads((ROOT / 'phase4/environments/demo-a.sources.json').read_text())
     for service, repository in repositories.items():
         revision = os.getenv('SOURCE_' + service.upper() + '_REVISION')
         if revision:
@@ -78,10 +81,15 @@ def configuration():
                                               revision=revision,
                                               required_checks=[name.strip() for name in os.getenv('SOURCE_' + service.upper() + '_CHECKS', '').split(',') if name.strip()])
     for variable, field in (('MERCADO_PAGO_TEST_SECRET_ARN', 'mercado_pago_test_secret_arn'),
+                            ('AUTH_SIGNING_SECRET_ARN', 'auth_signing_secret_arn'),
+                            ('E2E_FIXTURE_SECRET_ARN', 'e2e_fixture_secret_arn'),
                             ('NEW_RELIC_SECRET_ARN', 'new_relic_secret_arn'), ('NETWORK_PROBE_IMAGE', 'network_probe_image')):
         if os.getenv(variable):
             config[field] = os.environ[variable]
     platform = config['terraform_inputs']['platform']
+    for name in ('success', 'failure', 'pending'):
+        if os.getenv('MERCADO_PAGO_' + name.upper() + '_URL'):
+            platform.setdefault('mercado_pago', {})[name + '_url'] = os.environ['MERCADO_PAGO_' + name.upper() + '_URL']
     for name in ('mongodb', 'rabbitmq', 'postgres'):
         if os.getenv(name.upper() + '_IMAGE'):
             platform.setdefault('images', {})[name] = os.environ[name.upper() + '_IMAGE']
@@ -108,8 +116,11 @@ def artifact_key():
 
 
 def technical_inputs(config, phase):
+    if phase == 'infra':
+        require(config['terraform_inputs']['infra'].get('cluster_bootstrap_access_enabled', False) is False,
+                'PERSISTENT_BOOTSTRAP_ADMIN_REJECTED')
     if phase == 'e2e':
-        raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
+        require(os.getenv('E2E_FIXTURE_SECRET_ARN'), 'AWS_E2E_FIXTURE_REQUIRED')
     if phase == 'release':
         for name in ('auth', 'os', 'execution', 'billing'):
             source = config.get('services', {}).get(name, {})
@@ -166,6 +177,8 @@ def contract_hash(driver):
 
 def plan(driver, phase):
     manifest = dict(schema_version=1, operation='deploy', environment='demo-a', phase=phase,
+                    bootstrap_protocol=BOOTSTRAP_PROTOCOL,
+                    temporary_cluster_admin=phase in PRIVILEGED_PHASES,
                     revision=os.environ['GITHUB_SHA'], account=ACCOUNT, region=REGION,
                     backend=driver.bucket, states=state_versions(driver), contract_sha256=contract_hash(driver),
                     terraform_version='1.15.8', run_id=os.environ['GITHUB_RUN_ID'])
@@ -220,6 +233,8 @@ def approved(driver, phase, reference, approved_hash, directory):
     encrypted = (directory / 'approved-plan.enc').read_bytes()
     require(approved_hash == summary['sha256'] == digest(canonical(manifest) + encrypted), 'APPROVED_PLAN_HASH_MISMATCH')
     require(manifest.get('run_id') == reference and manifest.get('phase') == phase
+            and manifest.get('bootstrap_protocol') == BOOTSTRAP_PROTOCOL
+            and manifest.get('temporary_cluster_admin') == (phase in PRIVILEGED_PHASES)
             and manifest.get('revision') == os.environ['GITHUB_SHA'] and manifest.get('environment') == 'demo-a'
             and manifest.get('account') == ACCOUNT and manifest.get('region') == REGION
             and manifest.get('backend') == driver.bucket and manifest.get('terraform_version') == '1.15.8', 'PLAN_CONTEXT_MISMATCH')
@@ -237,6 +252,10 @@ def deploy(driver, phase, reference, approved_hash, directory):
                 or (stack == 'identities' and phase in MAINTENANCE_PHASES), 'STACK_REJECTED')
         binary = base64.b64decode(payload['binary'], validate=True)
         require(digest(binary) == manifest['binary_sha256'], 'APPROVED_PLAN_HASH_MISMATCH')
+        if stack == 'infra':
+            require(payload['variables'].get('cluster_bootstrap_access_enabled', False) is False,
+                    'PERSISTENT_BOOTSTRAP_ADMIN_REJECTED')
+            driver.recovery_ready(opening=False)
         if stack in ('platform', 'edge'):
             driver.verify_attestations(stack, payload['variables'])
         saved = Path(driver.temporary.name) / 'approved.tfplan'
@@ -273,13 +292,31 @@ def deploy(driver, phase, reference, approved_hash, directory):
 
 
 class PipelineDriver(Driver):
+    def load_closure(self):
+        identity = self.api('sts', 'get_caller_identity')
+        require(identity['Account'] == ACCOUNT and identity['Arn'].startswith(
+            f'arn:aws:sts::{ACCOUNT}:assumed-role/{PREFIX}-' + os.environ['EXECUTOR_ROLE'] + '/'),
+            'OIDC_IDENTITY_REJECTED')
+        receipt = ROOT / 'actions-report/execution/endpoint-lease.json'
+        if receipt.exists():
+            lease = json.loads(receipt.read_text())
+            require(lease.get('run_id') == os.environ['GITHUB_RUN_ID']
+                    and lease.get('revision') == os.environ['GITHUB_SHA']
+                    and re.fullmatch('[0-9a-f]{32}', lease.get('lease_id', '')), 'ENDPOINT_LEASE_SCOPE_REJECTED')
+            self.lease = lease['lease_id']
+
     @contextlib.contextmanager
     def kubernetes(self):
+        phase = self.report.data.get('phase', '')
+        privileged = phase in PRIVILEGED_PHASES or self.report.data['operation'] == 'teardown'
+        require(not privileged or getattr(self, 'authorization_source', None) == 'github-environment',
+                'BOOTSTRAP_NOT_AUTHORIZED')
         if self.config.get('endpoint', {}).get('mode') == 'broker':
+            self.recovery_ready()
             require(self.invoke('recovery', {'probe': True}).get('verified') is True, 'LIVE_RECOVERY_PROBE_FAILED')
             self.config = copy.deepcopy(self.config)
             self.config['endpoint']['independent_canary_verified'] = True
-        with super().kubernetes():
+        with super().kubernetes(privileged=privileged):
             yield
 
     def destroy(self):
@@ -299,12 +336,37 @@ class PipelineDriver(Driver):
         valid_teardown = cluster and receipt.get('verified') and receipt.get('cluster_created_at') == str(cluster['createdAt'])
         if cluster and not valid_teardown:
             require(not self.journal['resources'].get('platform') and not self.journal['resources'].get('edge')
-                    and not self.owned_load_balancers() and not self.data_volumes(), 'PRIVILEGED_TEARDOWN_REQUIRED')
+                    and not self.owned_load_balancers() and not self.data_volumes()
+                    and not self.non_node_volumes(), 'PRIVILEGED_TEARDOWN_REQUIRED')
             for stack in ('platform', 'edge'):
                 require(state_versions(self)[stack] is None, 'PRIVILEGED_TEARDOWN_REQUIRED', stack)
             self.receipt('teardown', dict(verified=True, cluster_created_at=str(cluster['createdAt']),
                                          recovery='INFRA_ONLY_NO_KUBERNETES_WORKLOAD_STATE'))
         super().destroy()
+
+    def non_node_volumes(self):
+        volumes = self.owned_volumes()
+        if not volumes:
+            return []
+        group = self.api('eks', 'describe_nodegroup', clusterName=PREFIX, nodegroupName=PREFIX + '-nodes')['nodegroup']
+        require(group.get('clusterName') == PREFIX and group.get('tags', {}).get('EnvironmentId') == 'demo-a',
+                'NODEGROUP_OWNERSHIP_REJECTED')
+        groups = {entry['name'] for entry in group['resources']['autoScalingGroups']}
+        instances = self.items('ec2', 'describe_instances', 'Reservations',
+                              Filters=[dict(Name='tag:eks:cluster-name', Values=[PREFIX])])
+        roots = {}
+        for reservation in instances:
+            for instance in reservation['Instances']:
+                tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                if tags.get('aws:autoscaling:groupName') not in groups or tags.get('EnvironmentId') != 'demo-a':
+                    continue
+                for mapping in instance.get('BlockDeviceMappings', []):
+                    if mapping['DeviceName'] == instance['RootDeviceName'] and mapping.get('Ebs', {}).get('DeleteOnTermination') is True:
+                        roots[mapping['Ebs']['VolumeId']] = instance['InstanceId']
+        return [volume for volume in volumes if volume['VolumeId'] not in roots
+                or not volume.get('Attachments')
+                or any(attachment['InstanceId'] != roots[volume['VolumeId']] for attachment in volume['Attachments'])
+                or any('kubernetes.io/created-for/' in tag['Key'] for tag in volume.get('Tags', []))]
 
 
 class RecoveryDriver(PipelineDriver):
@@ -341,7 +403,8 @@ class MaintenanceDriver(PipelineDriver):
             inputs.update(recovery_installation_approved=True, recovery_opening_approved=True, recovery_verification_approved=True)
         self.maintenance_inputs = inputs
         self.requested_external_inputs = {name: configuration[field] for name, field in
-            (('newrelic', 'new_relic_secret_arn'), ('mercado-pago', 'mercado_pago_test_secret_arn')) if configuration.get(field)}
+            (('newrelic', 'new_relic_secret_arn'), ('mercado-pago', 'mercado_pago_test_secret_arn'),
+             ('e2e-fixture', 'e2e_fixture_secret_arn')) if configuration.get(field)}
         inputs.setdefault('external_input_secrets', {}).update(self.requested_external_inputs)
         self.phase = phase
         if phase == 'iam-maintenance':
@@ -389,6 +452,9 @@ class MaintenanceDriver(PipelineDriver):
                     values = resource.get('values', {})
                     if resource['type'] == 'aws_s3_bucket' and values.get('bucket') == PREFIX + '-artifacts':
                         self.maintenance_inputs['artifact_bucket_installation_approved'] = True
+                    if resource['type'] == 'aws_iam_role' and any(statement.get('Sid') == 'CompleteWorkflowDelegation'
+                            for statement in json.loads(values.get('assume_role_policy', '{}')).get('Statement', [])):
+                        self.maintenance_inputs['complete_workflow_delegation_enabled'] = True
                     if resource['type'] == 'aws_lambda_function' and values.get('function_name') == PREFIX + '-endpoint-recovery':
                         settings = json.loads(values['environment'][0]['variables']['RECOVERY_CONFIG'])
                         require(settings['account'] == ACCOUNT and settings['environment_id'] == 'demo-a', 'RECOVERY_SCOPE_REJECTED')
@@ -465,7 +531,10 @@ def main():
                   RecoveryDriver(config, report, catalog=catalog) if options.phase in ('recovery-closed', 'recovery-expiry') else
                   PipelineDriver(config, report, catalog=catalog))
         with report.phase('identity-backend-inventory', PREFIX):
-            driver.load()
+            if operation == 'close':
+                driver.load_closure()
+            else:
+                driver.load()
             version = json.loads(driver.run(['terraform', 'version', '-json']))
             require(version['terraform_version'] == '1.15.8', 'TERRAFORM_VERSION_REJECTED')
         with report.phase(operation, options.phase):
@@ -474,6 +543,7 @@ def main():
             elif operation == 'deploy':
                 deploy(driver, options.phase, options.plan_run, options.hash, options.artifact)
             elif operation == 'teardown':
+                driver.authorization_source = 'github-environment'
                 driver.teardown()
             elif operation == 'destroy':
                 driver.destroy()

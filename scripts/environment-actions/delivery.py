@@ -133,7 +133,8 @@ def observability(driver, platform):
     require(driver.config.get('observability_privileged_approved') is True
             or getattr(driver, 'authorization_source', None) == 'github-environment', 'OBSERVABILITY_NAMESPACE_APPROVAL_REQUIRED')
     value = driver.api('secretsmanager', 'get_secret_value', SecretId=driver.config['new_relic_secret_arn'])['SecretString']
-    licence = json.loads(value)['licenseKey']
+    settings = json.loads(value)
+    licence = settings['licenseKey']
     from kubernetes import client, config
     config.load_kube_config()
     core = client.CoreV1Api()
@@ -150,7 +151,21 @@ def observability(driver, platform):
     values.write_text(contract['values_yaml'])
     driver.run(['helm', 'upgrade', '--install', PREFIX + '-observability', contract['chart'], '--repo', contract['repository'],
         '--version', contract['version'], '-n', contract['namespace'], '-f', str(values), '--wait', '--timeout=300s'])
-    driver.receipt('observability', dict(verified=True, note='Chart ready; telemetry arrival must be checked in New Relic.'))
+    driver.receipt('observability', dict(verified=True, chart_ready=True, telemetry_received=False))
+    if settings.get('apiKey') and isinstance(settings.get('accountId'), int):
+        nrql = f"SELECT count(*) FROM K8sPodSample WHERE clusterName = '{PREFIX}' SINCE 15 minutes ago"
+        query = '{ actor { account(id: ' + str(settings['accountId']) + ') { nrql(query: ' + json.dumps(nrql) + ') { results } } } }'
+        request = urllib.request.Request('https://api.newrelic.com/graphql',
+            data=canonical(dict(query=query)), headers={'API-Key': settings['apiKey'], 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.load(response)
+        require(not result.get('errors'), 'NEW_RELIC_TELEMETRY_QUERY_FAILED')
+        rows = result['data']['actor']['account']['nrql']['results']
+        require(rows and rows[0].get('count', 0) > 0, 'NEW_RELIC_TELEMETRY_NOT_RECEIVED')
+        driver.receipt('observability', dict(verified=True, chart_ready=True, telemetry_received=True))
+    else:
+        driver.report.data['checks'].append(dict(phase='observability-ingestion', resource='New Relic', status='DEFERRED',
+            reason='API_KEY_AND_ACCOUNT_ID_REQUIRED_TO_VERIFY_RECEIVED_DATA', duration_ms=0))
 
 
 def verify_databases(driver, platform):
@@ -176,7 +191,7 @@ def verify_databases(driver, platform):
 
 def validate_phase(driver, phase):
     if phase == 'e2e':
-        raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
+        require(os.getenv('E2E_FIXTURE_SECRET_ARN'), 'AWS_E2E_FIXTURE_REQUIRED')
     if phase.startswith('recovery-'):
         require(driver.config.get('endpoint', {}).get('mode') == 'broker', 'BROKER_CONFIGURATION_REQUIRED')
         require(driver.cluster(missing_ok=True), 'EXISTING_CLUSTER_REQUIRED')
@@ -211,6 +226,10 @@ def validate_phase(driver, phase):
 
 
 def up_phase(driver, phase):
+    if phase == 'payment-config':
+        from aws_e2e import verify_provider
+        verify_provider(driver)
+        return
     if phase == 'release':
         from live_release import release
         release(driver)
@@ -222,9 +241,13 @@ def up_phase(driver, phase):
         alb(driver)
         return
     if phase == 'e2e':
-        raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
+        from aws_e2e import run
+        run(driver)
+        return
     platform = driver.outputs('platform')
     with driver.kubernetes():
+        if phase in ('foundation', 'controller', 'observability'):
+            driver.bootstrap_permissions()
         if phase == 'foundation':
             foundation(driver, platform)
         elif phase == 'controller':

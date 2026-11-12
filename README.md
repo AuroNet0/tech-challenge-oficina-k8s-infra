@@ -1,5 +1,19 @@
 # Tech Challenge Oficina - Kubernetes Infra
 
+## Operação atual: Plan → Deploy → Destroy
+
+Use a branch `homolog` e os três workflows operacionais, sem selecionar fases.
+O Deploy completo recebe o run/hash do Plan e usa uma aprovação no Environment
+bootstrap; Destroy exige confirmação e aprovação no Environment destroy.
+As roles e os subjects immutable existentes são preservados; a delegação restrita
+necessária à execução completa aparece no plano IAM para revisão.
+
+- [Arquitetura, fluxos completos, pré-requisitos e roteiro da demonstração](docs/cicd-final-delivery.md)
+- [Evidências de validação offline e limitações](docs/cicd-final-validation.md)
+
+Verificações AWS, pagamento real de teste e telemetria ainda exigem execução
+autorizada posterior. As instruções históricas por fases não são o formulário atual.
+
 ## Fase 4 — preparação de ambientes efêmeros
 
 A base da Etapa 9.2.2-A está em `phase4/`, separada das roots legadas

@@ -92,12 +92,26 @@ def public_roots(driver):
             current = {certificate.fingerprint(hashes.SHA256()): certificate for certificate in certificates}
             require(current, 'PRODUCTION_PUBLIC_ROOTS_MISSING')
             if reference_roots is not None:
-                require(set(current) == set(reference_roots), 'JRE_PUBLIC_ROOTS_DIFFER_BETWEEN_SERVICES')
+                current = {fingerprint: certificate for fingerprint, certificate in current.items() if fingerprint in reference_roots}
+                require(current, 'NO_COMMON_PRODUCTION_PUBLIC_ROOTS')
             reference_roots = current
     return tuple(reference_roots.values())
 
 
+def ensure_signing(driver):
+    arn = driver.config.get('auth_signing_secret_arn', '')
+    require(re.fullmatch(fr'arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:/oficina/phase4/demo-a/auth-signing-[A-Za-z0-9]{{6}}', arn),
+        'EXTERNAL_AUTH_SIGNING_IDENTITY_REQUIRED')
+    resources = driver.api('resourcegroupstaggingapi', 'get_resources', ResourceARNList=[arn])['ResourceTagMappingList']
+    require(len(resources) == 1 and resources[0]['ResourceARN'] == arn, 'AUTH_SIGNING_METADATA_NOT_FOUND')
+    tags = {tag['Key']: tag['Value'] for tag in resources[0]['Tags']}
+    require(tags.get('EnvironmentId') == 'demo-a' and tags.get('Lifecycle') == 'persistent', 'AUTH_SIGNING_OWNERSHIP_REJECTED')
+    driver.report.data['checks'].append(dict(phase='public-signing-identity', resource=arn, status='DEFERRED', duration_ms=0,
+        reason='METADATA_PRESENT; private key usability requires Lambda login/JWKS; key is never read by deploy'))
+
+
 def deliver_secrets(driver):
+    ensure_signing(driver)
     contracts, plan, source, target = secret_context(driver)
     master = source.read(plan, 'postgres-bootstrap-admin')['payload']
     external = json.loads(driver.api('secretsmanager', 'get_secret_value',

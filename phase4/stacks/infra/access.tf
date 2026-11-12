@@ -2,6 +2,10 @@ variable "cluster_bootstrap_access_enabled" {
   description = "Elevacao temporaria e aprovada para instalar CRDs/controllers/RBAC; remover apos bootstrap."
   type        = bool
   default     = false
+  validation {
+    condition     = !var.cluster_bootstrap_access_enabled
+    error_message = "Privilegio administrativo temporario pertence ao broker com lease; nunca persistir no plano Terraform."
+  }
 }
 
 variable "automation_roles" {
@@ -39,6 +43,7 @@ output "executor_access_contract" {
   value = {
     group                               = "oficina:${var.environment_id}:executor"
     bootstrap_elevation                 = var.cluster_bootstrap_access_enabled
+    bootstrap_authorization             = "broker-lease-AmazonEKSClusterAdminPolicy-provision-only"
     bootstrap_elevation_must_be_revoked = true
     token_source                        = "aws eks get-token com sessao OIDC temporaria; nunca token SA persistente"
     roles                               = var.automation_roles

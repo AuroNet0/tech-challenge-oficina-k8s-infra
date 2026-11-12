@@ -33,6 +33,7 @@ class PipelineTests(unittest.TestCase):
         self.driver.save = lambda: self.commands.append(('save',))
         self.driver.snapshot = lambda stack: self.commands.append(('snapshot', stack))
         self.driver.api = lambda *args, **kwargs: (_ for _ in ()).throw(Failure('404'))
+        self.driver.recovery_ready = lambda opening=True: self.commands.append(('recovery-check', opening))
 
         def terraform(stack, arguments):
             self.commands.append((arguments[0], stack))
@@ -67,6 +68,31 @@ class PipelineTests(unittest.TestCase):
             pipeline.deploy(self.driver, 'infra', '123', summary['sha256'], self.temporary.name)
         self.assertIn(('apply', 'infra'), self.commands)
         self.assertFalse(any(command[0] == 'plan' for command in self.commands))
+
+    def test_infra_without_recovery_installation_never_applies(self):
+        summary = self.make_plan()
+        self.commands.clear()
+        self.driver.recovery_ready = lambda opening: (_ for _ in ()).throw(Failure('RECOVERY_INSTALLATION_NOT_READY'))
+        with patch('pipeline.gh_json', return_value=self.run):
+            with self.assertRaisesRegex(Failure, 'RECOVERY_INSTALLATION_NOT_READY'):
+                pipeline.deploy(self.driver, 'infra', '123', summary['sha256'], self.temporary.name)
+        self.assertNotIn(('apply', 'infra'), self.commands)
+        self.assertNotIn(('save',), self.commands)
+
+    def test_plan_from_previous_bootstrap_protocol_cannot_apply(self):
+        summary = self.make_plan()
+        directory = Path(self.temporary.name)
+        payload = pipeline.unseal((directory / 'approved-plan.enc').read_bytes(), summary['manifest'])
+        summary['manifest'].pop('bootstrap_protocol')
+        encrypted = pipeline.seal(payload, summary['manifest'])
+        (directory / 'approved-plan.enc').write_bytes(encrypted)
+        summary['sha256'] = digest(canonical(summary['manifest']) + encrypted)
+        (directory / 'plan.json').write_bytes(canonical(summary))
+        self.commands.clear()
+        with patch('pipeline.gh_json', return_value=self.run):
+            with self.assertRaisesRegex(Failure, 'PLAN_CONTEXT_MISMATCH'):
+                pipeline.deploy(self.driver, 'infra', '123', summary['sha256'], directory)
+        self.assertNotIn(('apply', 'infra'), self.commands)
 
     def test_hash_and_encrypted_artifact_tampering_block_apply(self):
         summary = self.make_plan()
@@ -220,8 +246,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_technical_inputs_fail_early_without_inventing_external_integrations(self):
         pipeline.technical_inputs(self.config, 'infra')
+        self.config['services'] = {}
         for phase, code in (('release', 'SOURCE_REVISION_AND_CHECKS_REQUIRED'),
-                            ('platform', 'PINNED_DATA_IMAGE_REQUIRED'), ('e2e', 'AWS_E2E_ADAPTER_REQUIRED')):
+                            ('platform', 'PINNED_DATA_IMAGE_REQUIRED'), ('e2e', 'AWS_E2E_FIXTURE_REQUIRED')):
             with self.assertRaisesRegex(Failure, code):
                 pipeline.technical_inputs(self.config, phase)
 
@@ -321,6 +348,7 @@ class PipelineTests(unittest.TestCase):
         driver.cluster = lambda missing_ok=False: dict(createdAt='owned-cluster-generation')
         driver.owned_load_balancers = lambda: []
         driver.data_volumes = lambda: []
+        driver.owned_volumes = lambda: []
         driver.api = lambda *args, **kwargs: (_ for _ in ()).throw(Failure('404'))
         driver.receipt = lambda key, value: driver.journal['receipts'].update({key: value})
         with patch.object(Driver, 'destroy') as destroy:
