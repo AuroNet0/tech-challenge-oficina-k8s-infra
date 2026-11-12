@@ -65,13 +65,23 @@ resource "aws_iam_role" "executor" {
   max_session_duration = 3600
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
+    Statement = concat([{
       Effect = "Allow", Principal = { Federated = local.oidc_provider }, Action = "sts:AssumeRoleWithWebIdentity"
       Condition = { StringEquals = {
         "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         "token.actions.githubusercontent.com:sub" = local.subjects[each.key]
       } }
-    }]
+      }], var.complete_workflow_delegation_enabled && each.key != "destroy" ? [{
+      Sid    = "CompleteWorkflowDelegation"
+      Effect = "Allow", Principal = { Federated = local.oidc_provider }, Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = { StringEquals = {
+        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        "token.actions.githubusercontent.com:sub" = concat(
+          ["repo:${local.repository}:environment:phase4-${var.environment_id}-bootstrap"],
+          each.key == "provision" ? [local.subjects.destroy] : []
+        )
+      } }
+    }] : [])
   })
   depends_on = [terraform_data.guard]
   lifecycle { prevent_destroy = true }

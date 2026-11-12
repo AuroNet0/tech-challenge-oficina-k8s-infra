@@ -73,6 +73,7 @@ def configuration():
     require(all(catalog['state_keys'][stack] == f'phase4/environments/demo-a/{stack}.tfstate' for stack in STACKS),
             'STATE_KEY_REJECTED')
     repositories = dict(auth='auth', os='os-service', execution='execution-service', billing='billing-service')
+    config['services'] = json.loads((ROOT / 'phase4/environments/demo-a.sources.json').read_text())
     for service, repository in repositories.items():
         revision = os.getenv('SOURCE_' + service.upper() + '_REVISION')
         if revision:
@@ -80,10 +81,15 @@ def configuration():
                                               revision=revision,
                                               required_checks=[name.strip() for name in os.getenv('SOURCE_' + service.upper() + '_CHECKS', '').split(',') if name.strip()])
     for variable, field in (('MERCADO_PAGO_TEST_SECRET_ARN', 'mercado_pago_test_secret_arn'),
+                            ('AUTH_SIGNING_SECRET_ARN', 'auth_signing_secret_arn'),
+                            ('E2E_FIXTURE_SECRET_ARN', 'e2e_fixture_secret_arn'),
                             ('NEW_RELIC_SECRET_ARN', 'new_relic_secret_arn'), ('NETWORK_PROBE_IMAGE', 'network_probe_image')):
         if os.getenv(variable):
             config[field] = os.environ[variable]
     platform = config['terraform_inputs']['platform']
+    for name in ('success', 'failure', 'pending'):
+        if os.getenv('MERCADO_PAGO_' + name.upper() + '_URL'):
+            platform.setdefault('mercado_pago', {})[name + '_url'] = os.environ['MERCADO_PAGO_' + name.upper() + '_URL']
     for name in ('mongodb', 'rabbitmq', 'postgres'):
         if os.getenv(name.upper() + '_IMAGE'):
             platform.setdefault('images', {})[name] = os.environ[name.upper() + '_IMAGE']
@@ -114,7 +120,7 @@ def technical_inputs(config, phase):
         require(config['terraform_inputs']['infra'].get('cluster_bootstrap_access_enabled', False) is False,
                 'PERSISTENT_BOOTSTRAP_ADMIN_REJECTED')
     if phase == 'e2e':
-        raise Failure('AWS_E2E_ADAPTER_REQUIRED', 'Billing integration/9.1.4 currently uses Docker and mock payments')
+        require(os.getenv('E2E_FIXTURE_SECRET_ARN'), 'AWS_E2E_FIXTURE_REQUIRED')
     if phase == 'release':
         for name in ('auth', 'os', 'execution', 'billing'):
             source = config.get('services', {}).get(name, {})
@@ -397,7 +403,8 @@ class MaintenanceDriver(PipelineDriver):
             inputs.update(recovery_installation_approved=True, recovery_opening_approved=True, recovery_verification_approved=True)
         self.maintenance_inputs = inputs
         self.requested_external_inputs = {name: configuration[field] for name, field in
-            (('newrelic', 'new_relic_secret_arn'), ('mercado-pago', 'mercado_pago_test_secret_arn')) if configuration.get(field)}
+            (('newrelic', 'new_relic_secret_arn'), ('mercado-pago', 'mercado_pago_test_secret_arn'),
+             ('e2e-fixture', 'e2e_fixture_secret_arn')) if configuration.get(field)}
         inputs.setdefault('external_input_secrets', {}).update(self.requested_external_inputs)
         self.phase = phase
         if phase == 'iam-maintenance':
@@ -445,6 +452,9 @@ class MaintenanceDriver(PipelineDriver):
                     values = resource.get('values', {})
                     if resource['type'] == 'aws_s3_bucket' and values.get('bucket') == PREFIX + '-artifacts':
                         self.maintenance_inputs['artifact_bucket_installation_approved'] = True
+                    if resource['type'] == 'aws_iam_role' and any(statement.get('Sid') == 'CompleteWorkflowDelegation'
+                            for statement in json.loads(values.get('assume_role_policy', '{}')).get('Statement', [])):
+                        self.maintenance_inputs['complete_workflow_delegation_enabled'] = True
                     if resource['type'] == 'aws_lambda_function' and values.get('function_name') == PREFIX + '-endpoint-recovery':
                         settings = json.loads(values['environment'][0]['variables']['RECOVERY_CONFIG'])
                         require(settings['account'] == ACCOUNT and settings['environment_id'] == 'demo-a', 'RECOVERY_SCOPE_REJECTED')

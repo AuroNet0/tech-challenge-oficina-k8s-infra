@@ -6,6 +6,15 @@ variable "environment_id" {
   }
 }
 
+variable "complete_workflow_delegation_enabled" {
+  type    = bool
+  default = false
+  validation {
+    condition     = !var.complete_workflow_delegation_enabled || (var.subject_format == "immutable" && var.environment_id == "demo-a")
+    error_message = "Delegacao completa exige subjects immutable e escopo exclusivo demo-a."
+  }
+}
+
 variable "aws_account_id" {
   type = string
   validation {

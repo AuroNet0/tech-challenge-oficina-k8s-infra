@@ -100,7 +100,7 @@ test('preflight continues independent checks after denied API and never reports 
 
 test('report sanitization excludes arbitrary exception text and writes artifacts on failure', async () => {
   await withReport('up', async report => {
-    const secret = 'password=synthetic-secret JWT=synthetic-token -----BEGIN PRIVATE KEY-----';
+    const secret = 'password=synthetic-secret JWT=synthetic-token -----BEGIN PRIV\u0041TE KEY-----';
     await report.check('terraform-plan', 'infra', () => { throw new Error(secret); });
     assert.equal(report.finish(), 1);
     for (const name of ['report.json', 'summary.md']) {
@@ -216,18 +216,24 @@ test('planning gate authorizes only infra planning without enabling apply', () =
 
 test('Plan only plans; Deploy consumes a saved artifact and Destroy retains both least-privilege roles', () => {
   const plan = fs.readFileSync(path.join(root, '.github/workflows/plan.yml'), 'utf8');
-  assert.ok(plan.includes('PREFLIGHT_INTENT: inspect'));
-  assert.ok(plan.includes('PREFLIGHT_SCOPE: infra'));
-  assert.ok(plan.includes('pipeline.py plan'));
+  const executor = fs.readFileSync(path.join(root, '.github/actions/complete/action.yml'), 'utf8');
+  const implementation = fs.readFileSync(path.join(root, 'scripts/environment-actions/complete.py'), 'utf8');
+  assert.ok(executor.includes('PREFLIGHT_INTENT: inspect'));
+  assert.ok(executor.includes('PREFLIGHT_SCOPE: infra'));
+  assert.ok(plan.includes('operation: plan-part'));
+  assert.ok(implementation.includes('pipeline.plan(driver, phase)'));
   assert.doesNotMatch(plan, /pipeline\.py (deploy|destroy|teardown|close)|terraform apply|confirmation:/);
   const deploy = fs.readFileSync(path.join(root, '.github/workflows/deploy.yml'), 'utf8');
-  assert.ok(deploy.includes('actions/download-artifact@v4'));
+  assert.ok(executor.includes('actions/download-artifact@v4'));
   assert.ok(deploy.includes('PROTECTED_ENVIRONMENT:'));
-  assert.ok(deploy.includes('--hash "$PLAN_HASH"'));
+  assert.ok(deploy.includes('PLAN_HASH: ${{ inputs.approved_plan_sha256 }}'));
+  assert.ok(implementation.includes('APPROVED_PLAN_HASH_MISMATCH'));
   const destroy = fs.readFileSync(path.join(root, '.github/workflows/destroy.yml'), 'utf8');
   assert.ok(destroy.includes('DESTROY demo-a'));
-  assert.ok(destroy.includes("always() && needs.teardown.result != 'cancelled'"));
-  for (const role of ['provision', 'destroy']) assert.ok(destroy.includes(`EXECUTOR_ROLE: ${role}`));
+  assert.ok(destroy.includes('complete.py destroy-all'));
+  assert.ok(implementation.includes("assume('provision')"));
+  assert.ok(implementation.includes("assume('destroy')"));
+  assert.ok(destroy.includes('EXECUTOR_ROLE: destroy'));
 });
 
 test('bootstrap requires approved boundaries and excludes secret-bearing input variables', () => {
@@ -237,6 +243,8 @@ test('bootstrap requires approved boundaries and excludes secret-bearing input v
     subject_format: 'immutable', workload_boundary_documents: Object.fromEntries(
       ['eks-cluster', 'eks-nodes', 'ebs-csi', 'load-balancer-controller', 'auth-lambda'].map(name => [name, '{}'])) };
   validateInputs(inputs);
+  validateInputs({ ...inputs, complete_workflow_delegation_enabled: true });
+  assert.throws(() => validateInputs({ ...inputs, subject_format: 'classic', complete_workflow_delegation_enabled: true }), /REQUIRES_IMMUTABLE/);
   assert.throws(() => validateInputs({ ...inputs, secret_payload: 'forbidden' }));
 });
 

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,7 +124,22 @@ class Report:
                 entry['failed_resource'] = error.resource
                 if error.resource:
                     entry['resource'] = error.resource
-            entry['next_action'] = 'Inspect this phase and its resource; correct the reported cause and rerun. Backend and inventory are preserved.'
+            else:
+                entry['detail'] = dict(exception_type=type(error).__name__,
+                    frames=[dict(file=Path(frame.filename).name, line=frame.lineno, function=frame.name)
+                        for frame in traceback.extract_tb(error.__traceback__)[-8:]])
+            corrections = {
+                'ACCESS_DENIED': 'Confira a action IAM e o ARN no diagnóstico; atualize somente a policy/boundary da role executora.',
+                'AccessDenied': 'Confira a action IAM e o ARN no diagnóstico; atualize somente a policy/boundary da role executora.',
+                'STATE_LOCK_FAILED': 'Identifique o proprietário do lock S3 e aguarde sua execução; não remova um lock ativo.',
+                'AWS_QUOTA_EXCEEDED': 'Confira a quota indicada em us-east-1; reduza o escopo ou solicite ajuste sem mudar o plano da conta.',
+                'AWS_CAPACITY_UNAVAILABLE': 'Confira capacidade nas zonas e tipos aprovados; alterações de capacidade exigem novo Plan.',
+                'READINESS_FAILED': 'Confira eventos, PVCs, logs atuais/anteriores e conexão com os bancos e RabbitMQ.',
+                'MIGRATION_FAILED': 'Confira o Job, versão Flyway e grants do banco indicado; preserve o state e o banco.',
+                'AWS_E2E_TRANSITION_TIMEOUT': 'Confira a última transição da Saga e o checkout de teste; não simule confirmação financeira.',
+            }
+            entry['message_pt'] = 'Falha na etapa ' + phase + ': ' + reason
+            entry['next_action'] = corrections.get(reason, 'Confira o recurso e a causa original nesta etapa; corrija o requisito e retome. State e inventário são preservados.')
             raise
         finally:
             entry['duration_ms'] = round((time.monotonic() - started) * 1000)
@@ -131,7 +147,8 @@ class Report:
             self.write()
 
     def write(self):
-        self.data['result'] = 'FAIL' if any(item['status'] == 'FAIL' for item in self.data['checks']) else 'PASS'
+        statuses = {item['status'] for item in self.data['checks']}
+        self.data['result'] = 'FAIL' if 'FAIL' in statuses else 'BLOCKED' if 'BLOCKED' in statuses else 'PASS'
         (self.directory / 'report.json').write_text(json.dumps(self.data, indent=2), encoding='utf-8')
         rows = ['# Environment executor: ' + self.data['result'],
                 f"Run {self.data['run_id']}; revision {self.data['revision']}", '',
@@ -240,7 +257,7 @@ class Driver:
             resource = next((str(arguments[key]) for key in ('ResourceArn', 'RoleName', 'Bucket', 'SecretId', 'name', 'Key') if key in arguments), service)
             raise Failure(code_of(error), f'{service}:{operation}', dict(request_id=metadata.get('RequestId'),
                 http_status=metadata.get('HTTPStatusCode'), aws_action=service + ':' + operation,
-                resource=resource)) from None
+                resource=resource, original_reason=safe_diagnostic(getattr(error, 'response', {}).get('Error', {}).get('Message', '')))) from None
 
     def items(self, service, operation, result, **arguments):
         client = self.client(service)
@@ -261,7 +278,7 @@ class Driver:
         stdout = result.stdout.decode(errors='replace') if isinstance(result.stdout, bytes) else result.stdout or ''
         stderr = result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr or ''
         if result.returncode:
-            context = dict(exit_code=result.returncode)
+            context = dict(exit_code=result.returncode, operation=arguments[0])
             if arguments[0] == 'terraform':
                 diagnostics = []
                 records = []
@@ -416,6 +433,10 @@ class Driver:
                 edge = self.outputs('edge')
                 if edge.get('jwt_contract'):
                     values['jwt'] = edge['jwt_contract']
+                    payment = values.get('mercado_pago', {})
+                    if all(payment.get(name + '_url') for name in ('success', 'failure', 'pending')):
+                        values['mercado_pago'] = dict(payment, enabled=True,
+                            notification_url=edge['jwt_contract']['issuer'] + '/api/v1/webhooks/mercado-pago')
                 receipts = self.journal['receipts']
                 for flag, receipt in dict(bootstrap_completed='bootstrap', secrets_delivered='secrets',
                         auth_image_verified='release', auth_migration_completed='databases',
@@ -433,11 +454,12 @@ class Driver:
                     values['auth_release'] = self.journal['auth_release']
                 receipts = self.journal['receipts']
                 values.update(publish_auth=profile in ('edge-auth', 'edge-alb', 'edge-business'),
-                    prepare_alb=profile in ('edge-alb', 'edge-business'), publish_business=profile == 'edge-business', publish_webhook=False)
+                    prepare_alb=profile in ('edge-alb', 'edge-business'), publish_business=profile == 'edge-business',
+                    publish_webhook=profile == 'edge-business')
                 mapping = dict(artifact_verified='release', bootstrap_layer_verified='release', secrets_verified='secrets',
                     bootstrap_completed='bootstrap', auth_migration_completed='databases', controller_ready='controller',
                     workloads_ready='health', network_policy_enforced='network-policy', pki_valid_for_operation='secrets',
-                    jwks_ready='jwks', targets_healthy='alb', listener_verified='alb')
+                    jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='mercado-pago')
                 values['readiness'] = {flag: receipts.get(receipt, {}).get('verified') is True for flag, receipt in mapping.items()}
                 if receipts.get('alb', {}).get('listener_arn'):
                     values['alb_listener_arn'] = receipts['alb']['listener_arn']
@@ -458,7 +480,7 @@ class Driver:
             mapping = dict(artifact_verified='release', bootstrap_layer_verified='release', secrets_verified='secrets',
                 bootstrap_completed='bootstrap', auth_migration_completed='databases', controller_ready='controller',
                 workloads_ready='health', network_policy_enforced='network-policy', pki_valid_for_operation='secrets',
-                jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='e2e')
+                jwks_ready='jwks', targets_healthy='alb', listener_verified='alb', mercado_pago_verified='mercado-pago')
             for flag, enabled in values.get('readiness', {}).items():
                 require(flag in mapping and (not enabled or receipts.get(mapping[flag], {}).get('verified') is True), 'LIVE_EVIDENCE_REQUIRED', flag)
                 if enabled:

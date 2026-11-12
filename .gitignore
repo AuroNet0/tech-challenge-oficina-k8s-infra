@@ -22,5 +22,6 @@ secrets-runtime/
 actions-report/
 approved-plan/
 sources/
+review-sources/
 *.tfplan
 phase4/bootstrap/identities/endpoint-recovery.zip

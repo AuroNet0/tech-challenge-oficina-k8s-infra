@@ -13,7 +13,7 @@ locals {
         { apiGroups = ["batch"], resources = ["jobs"], verbs = ["get", "list", "watch", "create", "update", "patch", "delete"] },
         { apiGroups = ["networking.k8s.io"], resources = ["networkpolicies", "ingresses"], verbs = ["get", "list", "watch", "create", "update", "patch", "delete"] },
         { apiGroups = [""], resources = ["secrets"], verbs = ["create"] },
-        { apiGroups = [""], resources = ["secrets"], resourceNames = namespace == local.namespace ? sort(keys(local.secret_contract)) : ["newrelic-license"], verbs = ["get", "update", "patch", "delete"] }
+        { apiGroups = [""], resources = ["secrets"], resourceNames = namespace == local.namespace ? sort(concat(keys(local.secret_contract), ["demo-fixture-sql"])) : ["newrelic-license"], verbs = ["get", "update", "patch", "delete"] }
       ]
     },
     {

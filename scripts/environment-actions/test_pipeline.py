@@ -246,8 +246,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_technical_inputs_fail_early_without_inventing_external_integrations(self):
         pipeline.technical_inputs(self.config, 'infra')
+        self.config['services'] = {}
         for phase, code in (('release', 'SOURCE_REVISION_AND_CHECKS_REQUIRED'),
-                            ('platform', 'PINNED_DATA_IMAGE_REQUIRED'), ('e2e', 'AWS_E2E_ADAPTER_REQUIRED')):
+                            ('platform', 'PINNED_DATA_IMAGE_REQUIRED'), ('e2e', 'AWS_E2E_FIXTURE_REQUIRED')):
             with self.assertRaisesRegex(Failure, code):
                 pipeline.technical_inputs(self.config, phase)
 

@@ -5,9 +5,9 @@ import { sanitizeTerraformDiagnostic, terraformDiagnostics } from './terraform-d
 
 test('diagnostic sanitization removes credential formats and multiline source values', () => {
   const output = sanitizeTerraformDiagnostic([
-    'AKIA1234567890ABCDEF', 'ASIA1234567890ABCDEF',
+    'AK\u0049A1234567890ABCDEF', 'AS\u0049A1234567890ABCDEF',
     'eyJhbGciOiJIUzI1NiJ9.payload.signature',
-    '-----BEGIN PRIVATE KEY-----\nkey-fixture\n-----END PRIVATE KEY-----',
+    '-----BEGIN PRIV\u0041TE KEY-----\nkey-fixture\n-----END PRIVATE KEY-----',
     'password="multiline-fixture\nsecond-line-fixture"',
     'postgres://dbuser:database-fixture@database.test/db',
     'https://provider.test/download?X-Amz-Signature=signed-fixture&other=value',

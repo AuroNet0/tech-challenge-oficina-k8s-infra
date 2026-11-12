@@ -3,10 +3,10 @@ variable "external_input_secrets" {
   default = {}
   validation {
     condition = alltrue([for name, arn in var.external_input_secrets :
-      contains(["newrelic", "mercado-pago"], name) &&
+      contains(["newrelic", "mercado-pago", "e2e-fixture"], name) &&
       can(regex("^arn:aws:secretsmanager:${var.aws_region}:${var.aws_account_id}:secret:/oficina/phase4/${var.environment_id}/inputs/${name}-[A-Za-z0-9]{6}$", arn))
     ])
-    error_message = "Somente ARNs exatos das entradas externas New Relic e Mercado Pago de teste."
+    error_message = "Somente ARNs exatos das entradas externas New Relic, Mercado Pago de teste e fixture E2E."
   }
 }
 
