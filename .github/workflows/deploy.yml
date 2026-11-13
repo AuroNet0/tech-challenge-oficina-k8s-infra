@@ -6,7 +6,7 @@ on:
       services_ref:
         description: Branch, tag or commit in the public service repositories
         type: string
-        default: homolog
+        default: main
       mercado_pago_secret_arn:
         description: ARN do segredo Mercado Pago
         type: string
