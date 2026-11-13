@@ -7,6 +7,10 @@ on:
         description: Successful images.yml run containing the images.json artifact
         required: true
         type: string
+      mercado_pago_secret_arn:
+        description: External Mercado Pago TEST credentials secret ARN in the workflow account and region
+        required: true
+        type: string
       mode:
         description: Terraform operation for phase4/stacks/platform
         required: true
@@ -40,6 +44,7 @@ jobs:
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       PLATFORM_MODE: ${{ inputs.mode }}
       IMAGES_RUN_ID: ${{ inputs.images_run_id }}
+      MERCADO_PAGO_SECRET_ARN: ${{ inputs.mercado_pago_secret_arn }}
       PLATFORM_LOG: /tmp/platform.log
       KUBECONFIG: /tmp/platform-kubeconfig
     steps:
@@ -65,12 +70,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::Falha ao validar inputs ou o run de images.yml; confira images_run_id e AWS_ROLE_ARN."' ERR
+          trap 'echo "::error::Falha ao validar inputs ou o run de images.yml; confira images_run_id, mercado_pago_secret_arn e AWS_ROLE_ARN."' ERR
           {
             echo '::group::Check inputs and images run'
             [[ "$PLATFORM_MODE" == plan || "$PLATFORM_MODE" == apply ]]
             [[ "$IMAGES_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             test -n "$AWS_ROLE_ARN"
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            payment_pattern="^arn:aws:secretsmanager:${AWS_REGION}:${account_id}:secret:[A-Za-z0-9/_+=.@!-]+-[A-Za-z0-9]{6}$"
+            if [[ ! "$MERCADO_PAGO_SECRET_ARN" =~ $payment_pattern ]]; then
+              echo '::error::mercado_pago_secret_arn deve ser um ARN completo do Secrets Manager na conta STS e regiao do workflow, com sufixo AWS de seis caracteres.'
+              exit 1
+            fi
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGES_RUN_ID}" > /tmp/platform-images-run.json
             jq -e '.path == ".github/workflows/images.yml" and .status == "completed" and .conclusion == "success"' \
               /tmp/platform-images-run.json
@@ -253,6 +265,163 @@ jobs:
             echo '::endgroup::'
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
+      - uses: actions/setup-python@v5
+        if: inputs.mode == 'apply'
+        with:
+          python-version: '3.13'
+
+      - name: Create rds-ca ConfigMap
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha na validacao do bundle RDS ou criacao dos ConfigMaps de CA; confira TLS, certificados e referencias dos manifests."' ERR
+          {
+            echo '::group::Create rds-ca ConfigMap'
+            terraform -chdir=phase4/stacks/platform output -json > /tmp/platform-outputs.json
+            source_url=https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem
+            curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 60 "$source_url" -o /tmp/platform-rds-ca.pem
+            mkdir -p /tmp/platform-rds-certificates
+            awk -v directory=/tmp/platform-rds-certificates '
+              /^-----BEGIN CERTIFICATE-----\r?$/ {
+                if (inside) { invalid = 1; exit 1 }
+                inside = 1; count++
+                destination = sprintf("%s/certificate-%03d.pem", directory, count)
+              }
+              /-----BEGIN / && !/^-----BEGIN CERTIFICATE-----\r?$/ { invalid = 1; exit 1 }
+              /-----END / && !/^-----END CERTIFICATE-----\r?$/ { invalid = 1; exit 1 }
+              inside { print > destination }
+              /^-----END CERTIFICATE-----\r?$/ {
+                if (!inside) { invalid = 1; exit 1 }
+                close(destination); inside = 0; next
+              }
+              !inside && /[^[:space:]]/ { invalid = 1; exit 1 }
+              END { if (invalid || inside || count < 1) exit 1 }
+            ' /tmp/platform-rds-ca.pem
+            for certificate in /tmp/platform-rds-certificates/certificate-*.pem; do
+              openssl x509 -in "$certificate" -noout
+              openssl x509 -in "$certificate" -noout -checkend 0
+            done
+            sha256sum /tmp/platform-rds-ca.pem
+            printf '\n### RDS CA\n\nsem checksum pinado (decisão para demo)\n\n' | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -er --arg source "$source_url" '
+              .external_configmaps.value | to_entries[] |
+              select(.value.source == $source and (.value.keys | index("ca.pem") != null)) |
+              .key
+            ' /tmp/platform-outputs.json > /tmp/platform-rds-configmaps.txt
+            while IFS= read -r configmap; do
+              jq -er --arg name "$configmap" '
+                [to_entries[].value | fromjson | .items[] | . as $resource |
+                  .. | objects |
+                  select(.configMap.name? == $name or .configMapKeyRef.name? == $name) |
+                  $resource.metadata.namespace] |
+                unique | if length > 0 and all(.[]; type == "string" and length > 0)
+                  then .[] else error("ConfigMap sem namespaces nos manifests") end
+              ' /tmp/platform-manifests.json > /tmp/platform-rds-namespaces.txt
+              while IFS= read -r namespace; do
+                printf 'ConfigMap %s; namespace %s (lidos dos outputs/manifests)\n' "$configmap" "$namespace" |
+                  tee -a "$GITHUB_STEP_SUMMARY"
+                kubectl create configmap "$configmap" -n "$namespace" \
+                  --from-file=ca.pem=/tmp/platform-rds-ca.pem --dry-run=client -o yaml | kubectl apply -f -
+              done < /tmp/platform-rds-namespaces.txt
+            done < /tmp/platform-rds-configmaps.txt
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Deliver secrets
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao instalar dependencias ou entregar secrets; confira permissoes, kubeconfig e credenciais TEST do Mercado Pago."' ERR
+          {
+            echo '::group::Deliver secrets'
+            python -m pip install -r scripts/platform-secrets/requirements.txt
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            python scripts/platform-secrets/deliver.py deliver \
+              --infra-contract /tmp/infra_contract.json \
+              --platform-outputs /tmp/platform-outputs.json \
+              --revision 0000000000000000000000000000000000000000 \
+              --images /tmp/platform-images/images.json \
+              --mercado-pago-secret-arn "$MERCADO_PAGO_SECRET_ARN" \
+              --region us-east-1 --account "$account_id" \
+              --receipts-out /tmp/platform-receipts.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Apply data and wait for StatefulSets
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao aplicar data ou aguardar StatefulSets prontos em 300s."' ERR
+          {
+            echo '::group::Apply data and wait for StatefulSets'
+            jq -er '.data' /tmp/platform-manifests.json > /tmp/platform-data.json
+            jq -e '[.items[] | select(.kind == "StatefulSet")] | length > 0' /tmp/platform-data.json
+            kubectl apply -f /tmp/platform-data.json
+            jq -r '.items[] | select(.kind == "StatefulSet") |
+              [.metadata.namespace, .metadata.name] | @tsv' /tmp/platform-data.json > /tmp/platform-statefulsets.tsv
+            while IFS=$'\t' read -r namespace statefulset; do
+              kubectl rollout status "statefulset/${statefulset}" -n "$namespace" --timeout=300s
+            done < /tmp/platform-statefulsets.tsv
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Apply bootstrap and clean temporary secrets
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha na fase bootstrap ou na remocao dos secrets temporarios de bootstrap."' ERR
+          {
+            echo '::group::Apply bootstrap and clean temporary secrets'
+            jq -er '.bootstrap' /tmp/platform-manifests.json > /tmp/platform-bootstrap.json
+            jq -e '[.items[] | select(.kind == "Job")] | length > 0' /tmp/platform-bootstrap.json
+            kubectl apply -f /tmp/platform-bootstrap.json
+            jq -r '.items[] | select(.kind == "Job") |
+              [.metadata.namespace, .metadata.name] | @tsv' /tmp/platform-bootstrap.json > /tmp/platform-bootstrap-jobs.tsv
+            while IFS=$'\t' read -r namespace job; do
+              if ! kubectl wait --for=condition=complete "job/${job}" -n "$namespace" --timeout=600s ||
+                ! kubectl get "job/${job}" -n "$namespace" -o json | \
+                  jq -e '(.status.succeeded // 0) > 0 and (.status.failed // 0) == 0'; then
+                echo "::error::Job ${namespace}/${job} falhou ou excedeu o timeout de 600s."
+                kubectl logs "job/${job}" -n "$namespace" --all-containers=true --tail=200 || \
+                  echo "::error::Nao foi possivel obter logs do Job ${namespace}/${job}."
+                exit 1
+              fi
+            done < /tmp/platform-bootstrap-jobs.tsv
+            python scripts/platform-secrets/deliver.py cleanup-temporary \
+              --lifecycle bootstrap --receipts /tmp/platform-receipts.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Apply migration and clean temporary secrets
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha na fase migration ou na remocao dos secrets temporarios de migration."' ERR
+          {
+            echo '::group::Apply migration and clean temporary secrets'
+            jq -er '.migration' /tmp/platform-manifests.json > /tmp/platform-migration.json
+            jq -e '[.items[] | select(.kind == "Job")] | length > 0' /tmp/platform-migration.json
+            kubectl apply -f /tmp/platform-migration.json
+            jq -r '.items[] | select(.kind == "Job") |
+              [.metadata.namespace, .metadata.name] | @tsv' /tmp/platform-migration.json > /tmp/platform-migration-jobs.tsv
+            while IFS=$'\t' read -r namespace job; do
+              if ! kubectl wait --for=condition=complete "job/${job}" -n "$namespace" --timeout=600s ||
+                ! kubectl get "job/${job}" -n "$namespace" -o json | \
+                  jq -e '(.status.succeeded // 0) > 0 and (.status.failed // 0) == 0'; then
+                echo "::error::Job ${namespace}/${job} falhou ou excedeu o timeout de 600s."
+                kubectl logs "job/${job}" -n "$namespace" --all-containers=true --tail=200 || \
+                  echo "::error::Nao foi possivel obter logs do Job ${namespace}/${job}."
+                exit 1
+              fi
+            done < /tmp/platform-migration-jobs.tsv
+            python scripts/platform-secrets/deliver.py cleanup-temporary \
+              --lifecycle migration --receipts /tmp/platform-receipts.json
+            printf '\n### Applied\n\nData, bootstrap and migration completed; temporary projections cleaned.\n' |
+              tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
       - name: Failure diagnostics
         if: failure()
         run: |
@@ -298,5 +467,6 @@ jobs:
             /tmp/platform-plan.txt
             /tmp/platform.log
             /tmp/platform-diagnostics.txt
+            /tmp/platform-receipts.json
           if-no-files-found: warn
           retention-days: 7
