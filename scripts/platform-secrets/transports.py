@@ -3,9 +3,30 @@ import copy
 from functools import wraps
 import json
 import re
+import sys
 import uuid
 
 from platform_secrets import check, equivalent_payload, parse_json, validate_canonical, validate_payload
+
+
+def secret_failure_detail(name, operation, error):
+    from platform_secrets import specifications
+
+    secret = name if name in specifications() or name == 'technical-ca' else 'unknown'
+    cause = type(error).__name__
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', cause):
+        cause = 'unknown'
+    aws_code = 'none'
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        pass
+    else:
+        if isinstance(error, ClientError):
+            code = error.response.get('Error', {}).get('Code')
+            if isinstance(code, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]{0,127}', code):
+                aws_code = code
+    print(f'DETAIL secret={secret} operation={operation} cause={cause} aws_code={aws_code}', file=sys.stderr)
 
 
 def sanitized_transport(operation):
@@ -84,8 +105,9 @@ class SecretsManagerReader:
             if name == 'postgres-bootstrap-admin':
                 payload = {key: payload[key] for key in ('username', 'password')}
             return {'version': response['VersionId'], 'payload': payload}
-        except Exception:
+        except Exception as error:
             from platform_secrets import ContractError
+            secret_failure_detail(name, 'read', error)
             raise ContractError('SOURCE_READ_REJECTED') from None
 
 
@@ -101,13 +123,17 @@ class SecretsManagerStore(SecretsManagerReader):
             check(self.read(plan, name)['payload'] == payload, 'ROTATION_REQUIRED')
             return
         tags = [{'Key': key, 'Value': value} for key, value in canonical_tags(plan, name).items()]
+        operation = 'create'
         try:
             response = self.client.create_secret(Name=plan.canonical_name(name), SecretString=json.dumps(payload),
                                                  ClientRequestToken=str(uuid.uuid4()), Tags=tags)
+            operation = 'arn'
             validate_arn(plan, name, response['ARN'])
             self.inventory[name] = response['ARN']
+            operation = 'verify'
             check(self.read(plan, name)['payload'] == payload, 'SOURCE_NOT_VERIFIED')
-        except Exception:
+        except Exception as error:
+            secret_failure_detail(name, operation, error)
             raise ContractError('SOURCE_CREATE_REJECTED') from None
 
 
