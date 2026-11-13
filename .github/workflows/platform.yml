@@ -18,6 +18,7 @@ on:
         options:
           - data
           - apps
+          - controller
         default: data
       mode:
         description: Terraform operation for phase4/stacks/platform
@@ -124,11 +125,11 @@ jobs:
             echo '::endgroup::'
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
-      - name: Read edge JWT contract
-        if: inputs.stage == 'apps'
+      - name: Read edge JWT and ALB contracts
+        if: inputs.stage == 'apps' || inputs.stage == 'controller'
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::Falha ao ler jwt_contract do edge; confira backend, output e URLs HTTPS de issuer/JWKS."' ERR
+          trap 'echo "::error::Falha ao ler contratos JWT/ALB do edge; confira backend, outputs, SG e URLs HTTPS de issuer/JWKS."' ERR
           {
             terraform -chdir=phase4/stacks/edge init -input=false -no-color \
               -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
@@ -143,6 +144,15 @@ jobs:
               all(.[]; type == "string" and length > 0) and
               (.issuer | startswith("https://")) and (.jwks_uri | startswith("https://"))
             )' /tmp/platform-edge-jwt.json > /tmp/platform-jwt.json
+            terraform -chdir=phase4/stacks/edge output -json edge_contract > /tmp/platform-edge-contract.json
+            jq -e --slurpfile infra /tmp/infra_contract.json '
+              .environment_id == $infra[0].environment_id and
+              (.alb_security_group_id | type == "string" and test("^sg-[0-9a-f]{17}$"))
+            ' /tmp/platform-edge-contract.json > /dev/null
+            if [[ "$PLATFORM_STAGE" == controller ]]; then
+              terraform -chdir=phase4/stacks/edge output -json controller_identity_contract \
+                > /tmp/platform-controller-identity.json
+            fi
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Resolve default EKS addon versions
@@ -203,17 +213,19 @@ jobs:
                   failure_url: "https://example.com/failure", pending_url: "https://example.com/pending"},
                 jwt: null, application_replicas: 0, auth_migration_enabled: true}' \
               > phase4/stacks/platform/tfvars.json
-            if [[ "$PLATFORM_STAGE" == apps ]]; then
-              jq --slurpfile jwt /tmp/platform-jwt.json '
-                .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false
+            if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
+              jq --slurpfile jwt /tmp/platform-jwt.json --slurpfile edge /tmp/platform-edge-contract.json '
+                .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false |
+                .alb_controller_identity_enabled = true |
+                .alb_identity_inputs = {security_group_id: $edge[0].alb_security_group_id, certificate_arn: null}
               ' phase4/stacks/platform/tfvars.json > /tmp/platform-apps-tfvars.json
               mv /tmp/platform-apps-tfvars.json phase4/stacks/platform/tfvars.json
             fi
             {
               printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
               printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
-              if [[ "$PLATFORM_STAGE" == apps ]]; then
-                printf 'Stage apps; JWT do edge; uma replica por Deployment; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
+              if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
+                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
               else
                 printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
               fi
@@ -536,6 +548,78 @@ jobs:
             [[ "$failed" == false ]]
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
+      - name: Set up Helm
+        if: inputs.mode == 'apply' && inputs.stage == 'controller'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Install and verify ALB Controller
+        if: inputs.mode == 'apply' && inputs.stage == 'controller'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao instalar ou verificar o ALB Controller; confira Helm, rollout, contratos e associacao Pod Identity."' ERR
+          {
+            cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
+            region=$(jq -er '.aws_region' /tmp/infra_contract.json)
+            vpc_id=$(jq -er '.vpc_id' /tmp/infra_contract.json)
+            name_prefix=$(jq -er '.name_prefix' /tmp/infra_contract.json)
+            release="${name_prefix}-alb"
+            aws eks update-kubeconfig --name "$cluster_name" --region "$region"
+            terraform -chdir=phase4/stacks/platform output -json network_controller_contract \
+              > /tmp/platform-network-controller.json
+            jq -e '.chart == "aws-load-balancer-controller" and .chart_version == "1.14.0" and
+              .namespace == "kube-system" and .service_account == "aws-load-balancer-controller" and
+              .identity.enabled == true and (.values_yaml | type == "string" and length > 0)' \
+              /tmp/platform-network-controller.json > /dev/null
+            jq -e --arg cluster "$cluster_name" '.cluster_name == $cluster and
+              .namespace == "kube-system" and .service_account == "aws-load-balancer-controller" and
+              (.helm_values_overlay | type == "object")' /tmp/platform-controller-identity.json > /dev/null
+            jq -er '.values_yaml' /tmp/platform-network-controller.json > /tmp/platform-controller-values.yaml
+            jq --arg cluster "$cluster_name" --arg region "$region" --arg vpc "$vpc_id" '
+              .helm_values_overlay + {clusterName: $cluster, region: $region, vpcId: $vpc,
+                replicaCount: 1, serviceAccount: {create: true, name: "aws-load-balancer-controller"}}
+            ' /tmp/platform-controller-identity.json > /tmp/platform-controller-overrides.json
+            helm repo add eks https://aws.github.io/eks-charts
+            helm repo update eks
+            helm upgrade --install "$release" eks/aws-load-balancer-controller \
+              --version 1.14.0 --namespace kube-system \
+              --values /tmp/platform-controller-values.yaml --values /tmp/platform-controller-overrides.json \
+              --wait --timeout 10m
+            kubectl get deployments -n kube-system -l "app.kubernetes.io/instance=${release}" \
+              -o json --request-timeout=30s > /tmp/platform-controller-deployments.json
+            deployment=$(jq -er '.items | if length == 1 then .[0].metadata.name
+              else error("Esperado exatamente um Deployment do controller") end' /tmp/platform-controller-deployments.json)
+            if ! kubectl rollout status "deployment/${deployment}" -n kube-system --timeout=300s; then
+              echo "::error::Rollout do ALB Controller kube-system/${deployment} falhou ou excedeu 300s."
+              exit 1
+            fi
+            aws eks list-pod-identity-associations --cluster-name "$cluster_name" --region "$region" \
+              --namespace kube-system --service-account aws-load-balancer-controller \
+              > /tmp/platform-controller-associations.json
+            if ! jq -e '.associations | length == 1 and all(.[];
+              .namespace == "kube-system" and .serviceAccount == "aws-load-balancer-controller")' \
+              /tmp/platform-controller-associations.json > /dev/null; then
+              echo '::error::Deve existir exatamente uma associacao Pod Identity para kube-system/aws-load-balancer-controller.'
+              exit 1
+            fi
+            association_id=$(jq -er '.associations[0].associationId' /tmp/platform-controller-associations.json)
+            aws eks describe-pod-identity-association --cluster-name "$cluster_name" --region "$region" \
+              --association-id "$association_id" > /tmp/platform-controller-association.json
+            role_arn=$(jq -er --slurpfile contract /tmp/platform-network-controller.json '
+              .association | select(.namespace == "kube-system" and
+                .serviceAccount == "aws-load-balancer-controller" and .roleArn == $contract[0].identity.role_arn) |
+              .roleArn | select(type == "string" and length > 0)' /tmp/platform-controller-association.json)
+            kubectl get deployment "$deployment" -n kube-system -o json --request-timeout=30s \
+              > /tmp/platform-controller-ready.json
+            {
+              printf '\n### ALB Controller\n\nChart: `aws-load-balancer-controller`, versao `1.14.0`; Helm `v3.17.3`.\n\n'
+              jq -r '"Deployment: kube-system/\(.metadata.name); replicas prontas/desejadas: \(.status.readyReplicas // 0)/\(.spec.replicas)."' \
+                /tmp/platform-controller-ready.json
+              printf '\nRole da associacao Pod Identity: `%s`.\n' "$role_arn"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
       - name: Failure diagnostics
         if: failure()
         run: |
@@ -565,6 +649,18 @@ jobs:
               fi
               kubectl get events -A --sort-by=.lastTimestamp --request-timeout=30s || \
                 echo '::error::Nao foi possivel listar eventos.'
+              if [[ "$PLATFORM_STAGE" == controller ]] && test -s /tmp/infra_contract.json; then
+                if name_prefix=$(jq -er '.name_prefix' /tmp/infra_contract.json); then
+                  release="${name_prefix}-alb"
+                  helm status "$release" -n kube-system || \
+                    echo '::error::Nao foi possivel consultar helm status do ALB Controller.'
+                  kubectl logs -n kube-system -l "app.kubernetes.io/instance=${release}" \
+                    --tail=100 --all-containers=true --request-timeout=30s || \
+                    echo '::error::Nao foi possivel obter logs do ALB Controller.'
+                else
+                  echo '::error::Contrato infra sem name_prefix para diagnosticos do ALB Controller.'
+                fi
+              fi
               if [[ "$PLATFORM_STAGE" == apps ]] && test -s /tmp/platform-failed-rollouts.tsv; then
                 while IFS=$'\t' read -r namespace deployment selector; do
                   printf '\nDeployment com falha: %s/%s; selector: %s\n' "$namespace" "$deployment" "$selector"
