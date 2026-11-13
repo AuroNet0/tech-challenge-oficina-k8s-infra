@@ -1,0 +1,302 @@
+name: Platform (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      images_run_id:
+        description: Successful images.yml run containing the images.json artifact
+        required: true
+        type: string
+      mode:
+        description: Terraform operation for phase4/stacks/platform
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+
+jobs:
+  platform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_WORKSPACE: default
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      PLATFORM_MODE: ${{ inputs.mode }}
+      IMAGES_RUN_ID: ${{ inputs.images_run_id }}
+      PLATFORM_LOG: /tmp/platform.log
+      KUBECONFIG: /tmp/platform-kubeconfig
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: platform-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Check inputs and images run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao validar inputs ou o run de images.yml; confira images_run_id e AWS_ROLE_ARN."' ERR
+          {
+            echo '::group::Check inputs and images run'
+            [[ "$PLATFORM_MODE" == plan || "$PLATFORM_MODE" == apply ]]
+            [[ "$IMAGES_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            test -n "$AWS_ROLE_ARN"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGES_RUN_ID}" > /tmp/platform-images-run.json
+            jq -e '.path == ".github/workflows/images.yml" and .status == "completed" and .conclusion == "success"' \
+              /tmp/platform-images-run.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Download images.json
+        uses: actions/download-artifact@v4
+        with:
+          name: images.json
+          run-id: ${{ inputs.images_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/platform-images
+
+      - name: Read infra contract
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao inicializar o backend infra ou ler platform_contract; confira o state de demo-a e as permissoes AWS."' ERR
+          {
+            echo '::group::Read infra contract'
+            terraform -chdir=phase4/stacks/infra init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config=key=phase4/environments/demo-a/infra.tfstate \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true
+            terraform -chdir=phase4/stacks/infra output -json platform_contract > /tmp/infra_contract.json
+            jq -e 'type == "object" and .environment_id == "demo-a" and .aws_region == "us-east-1"' \
+              /tmp/infra_contract.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Resolve default EKS addon versions
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao resolver versoes default dos addons para Kubernetes 1.35."' ERR
+          {
+            echo '::group::Resolve default EKS addon versions'
+            for addon in eks-pod-identity-agent aws-ebs-csi-driver vpc-cni; do
+              aws eks describe-addon-versions --kubernetes-version 1.35 --addon-name "$addon" \
+                --output json > "/tmp/platform-${addon}.json"
+              version=$(jq -r '[.addons[].addonVersions[] |
+                select(any(.compatibilities[]; .clusterVersion == "1.35" and .defaultVersion == true)) |
+                .addonVersion] | unique | if length == 1 then .[0] else empty end' "/tmp/platform-${addon}.json")
+              if [[ -z "$version" || "$version" == null ]]; then
+                echo "::error::Addon ${addon} sem uma versao default unica para Kubernetes 1.35 em ${AWS_REGION}."
+                exit 1
+              fi
+              printf '%s\n' "$version" > "/tmp/platform-${addon}.version"
+              printf '%s: %s\n' "$addon" "$version"
+            done
+            jq -n \
+              --arg pod_identity "$(cat /tmp/platform-eks-pod-identity-agent.version)" \
+              --arg ebs_csi "$(cat /tmp/platform-aws-ebs-csi-driver.version)" \
+              --arg vpc_cni "$(cat /tmp/platform-vpc-cni.version)" \
+              '{pod_identity: $pod_identity, ebs_csi: $ebs_csi, vpc_cni: $vpc_cni}' > /tmp/platform-addons.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Generate Terraform inputs
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao gerar tfvars.json; confira identidade AWS, contrato infra e os sete digests de images.json."' ERR
+          {
+            echo '::group::Generate Terraform inputs'
+            identity=$(aws sts get-caller-identity --output json)
+            account_id=$(jq -er '.Account' <<< "$identity")
+            caller_arn=$(jq -er '.Arn' <<< "$identity")
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::${account_id}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+            role_name=${AWS_ROLE_ARN##*/}
+            [[ "$caller_arn" == "arn:aws:sts::${account_id}:assumed-role/${role_name}/"* ]]
+            jq -e --arg account "$account_id" '.aws_account_id == $account' /tmp/infra_contract.json
+            jq -e '
+              (keys == ["auth", "billing", "execution", "mongodb", "os", "postgres", "rabbitmq"]) and
+              all(.[]; type == "string" and test("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$"))
+            ' /tmp/platform-images/images.json
+            jq -n \
+              --arg account_id "$account_id" \
+              --slurpfile infra_contract /tmp/infra_contract.json \
+              --slurpfile images /tmp/platform-images/images.json \
+              --slurpfile addon_versions /tmp/platform-addons.json \
+              '{environment_id: "demo-a", aws_region: "us-east-1",
+                aws_account_id: $account_id, git_revision: "0000000000000000000000000000000000000000",
+                infra_contract: $infra_contract[0], images: $images[0], addon_versions: $addon_versions[0],
+                new_relic_chart_version: "6.0.0",
+                mercado_pago: {enabled: false, success_url: "https://example.com/success",
+                  failure_url: "https://example.com/failure", pending_url: "https://example.com/pending"},
+                jwt: null, application_replicas: 0, auth_migration_enabled: true}' \
+              > phase4/stacks/platform/tfvars.json
+            {
+              printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
+              printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
+              printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
+              cat /tmp/platform-addons.json
+              printf '```\n'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Terraform init
+        working-directory: phase4/stacks/platform
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform init de platform; confira backend e permissoes AWS."' ERR
+          {
+            echo '::group::Terraform init'
+            terraform init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config=key=phase4/environments/demo-a/platform.tfstate \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Terraform validate
+        working-directory: phase4/stacks/platform
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform validate de platform; confira o diagnostico no log."' ERR
+          {
+            echo '::group::Terraform validate'
+            terraform validate -no-color
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Terraform plan
+        working-directory: phase4/stacks/platform
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform plan de platform; confira catalogo, contratos, versoes de addons e acesso ao EKS."' ERR
+          {
+            echo '::group::Terraform plan'
+            terraform plan -input=false -no-color -lock-timeout=5m -var-file=tfvars.json -out=tfplan
+            terraform show -no-color tfplan > /tmp/platform-plan.txt
+            {
+              printf '### Terraform plan\n\n```text\n'
+              cat /tmp/platform-plan.txt
+              printf '```\n'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Terraform apply
+        if: inputs.mode == 'apply'
+        working-directory: phase4/stacks/platform
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform apply de platform; confira o log e o state antes de repetir."' ERR
+          {
+            echo '::group::Terraform apply'
+            terraform apply -input=false -no-color -lock-timeout=5m tfplan
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Apply foundation and network only
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao exportar manifests ou aplicar foundation/network; confira kubeconfig, acesso EKS e namespaces."' ERR
+          {
+            echo '::group::Apply foundation and network only'
+            terraform -chdir=phase4/stacks/platform output -json manifests > /tmp/platform-manifests.json
+            cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
+            aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION"
+            jq -er '.foundation' /tmp/platform-manifests.json > /tmp/platform-foundation.json
+            jq -er '.network' /tmp/platform-manifests.json > /tmp/platform-network.json
+            jq '{apiVersion: "v1", kind: "List", items: [.items[] | select(.kind == "Namespace")]}' \
+              /tmp/platform-foundation.json > /tmp/platform-namespaces.json
+            jq -e '.items | length > 0' /tmp/platform-namespaces.json
+            kubectl apply -f /tmp/platform-namespaces.json
+            mapfile -t namespaces < <(jq -r '.items[].metadata.name' /tmp/platform-namespaces.json)
+            for namespace in "${namespaces[@]}"; do
+              kubectl wait --for=jsonpath='{.status.phase}'=Active "namespace/${namespace}" --timeout=120s
+            done
+            kubectl apply -f /tmp/platform-foundation.json
+            kubectl apply -f /tmp/platform-network.json
+            printf '\n### Applied\n\nFoundation and network only.\n' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao gravar diagnosticos de platform."' ERR
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Failure diagnostics\n\n```text\n'
+              if ! test -s "$KUBECONFIG" && test -s /tmp/infra_contract.json; then
+                if cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json); then
+                  aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION" || \
+                    echo '::error::Nao foi possivel preparar kubeconfig para diagnosticos.'
+                else
+                  echo '::error::Contrato infra sem nome do cluster para diagnosticos.'
+                fi
+              fi
+              kubectl get pods -A -o wide --request-timeout=30s || echo '::error::Nao foi possivel listar pods.'
+              if kubectl get pods -A --field-selector=status.phase!=Running -o json \
+                --request-timeout=30s > /tmp/platform-non-running-pods.json; then
+                while IFS=$'\t' read -r namespace pod; do
+                  kubectl describe pod "$pod" -n "$namespace" --request-timeout=30s || \
+                    echo "::error::Nao foi possivel descrever pod ${namespace}/${pod}."
+                done < <(jq -r '.items[] | [.metadata.namespace, .metadata.name] | @tsv' /tmp/platform-non-running-pods.json)
+              else
+                echo '::error::Nao foi possivel consultar pods fora de Running.'
+              fi
+              kubectl get events -A --sort-by=.lastTimestamp --request-timeout=30s || \
+                echo '::error::Nao foi possivel listar eventos.'
+              printf '```\n\n### Last 200 log lines\n\n```text\n'
+              if test -f "$PLATFORM_LOG"; then tail -n 200 "$PLATFORM_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee /tmp/platform-diagnostics.txt | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Upload plan, log and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/platform-plan.txt
+            /tmp/platform.log
+            /tmp/platform-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 7
