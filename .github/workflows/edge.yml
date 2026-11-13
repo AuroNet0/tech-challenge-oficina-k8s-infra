@@ -14,6 +14,7 @@ on:
         options:
           - auth
           - alb
+          - business
         default: auth
       mode:
         description: Terraform operation for phase4/stacks/edge (publish_auth)
@@ -153,20 +154,62 @@ jobs:
                 publish_auth: true, prepare_alb: false, publish_business: false, publish_webhook: false,
                 readiness: {}, auth_release: $release[0], alb_tls: null, alb_listener_arn: null}
             ' > phase4/stacks/edge/tfvars.json
-            if [[ "$EDGE_STAGE" == alb ]]; then
+            if [[ "$EDGE_STAGE" == alb || "$EDGE_STAGE" == business ]]; then
               jq '.prepare_alb = true' phase4/stacks/edge/tfvars.json > /tmp/edge-alb-tfvars.json
               mv /tmp/edge-alb-tfvars.json phase4/stacks/edge/tfvars.json
             fi
             declared_variables=$(sed -n 's/^variable "\([^"]*\)".*/\1/p' phase4/stacks/edge/*.tf | sort)
             supplied_variables=$(jq -r 'keys[]' phase4/stacks/edge/tfvars.json | sort)
             [[ "$declared_variables" == "$supplied_variables" ]]
-            if [[ "$EDGE_STAGE" == alb ]]; then
-              printf '### Edge prepare_alb\n\nMode: `%s`; Auth release run: `%s`.\n\nAuth mantido; ALB habilitado; business e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
-                "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$EDGE_STAGE" == alb || "$EDGE_STAGE" == business ]]; then
+              if [[ "$EDGE_STAGE" == business ]]; then
+                printf '### Edge publish_business\n\nMode: `%s`; Auth release run: `%s`.\n\nAuth e preparacao ALB mantidos; business habilitado; webhook desabilitado; TLS null; readiness sem atestacoes. Listener descoberto antes do plan.\n' \
+                  "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+              else
+                printf '### Edge prepare_alb\n\nMode: `%s`; Auth release run: `%s`.\n\nAuth mantido; ALB habilitado; business e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
+                  "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+              fi
             else
               printf '### Edge publish_auth\n\nMode: `%s`; Auth release run: `%s`.\n\nBusiness, ALB e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
                 "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
             fi
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Discover business listener before plan
+        if: inputs.stage == 'business'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao descobrir ou validar listener de negocio antes do plan; confira ALB existente, HTTP/80 e contrato infra."' ERR
+          {
+            name_prefix=$(jq -er '.name_prefix' /tmp/infra_contract.json)
+            region=$(jq -er '.aws_region' /tmp/infra_contract.json)
+            account_id=$(jq -er '.aws_account_id' /tmp/infra_contract.json)
+            alb_name="${name_prefix}-edge"
+            if ! aws elbv2 describe-load-balancers --names "$alb_name" > /tmp/edge-business-alb.json; then
+              echo "::error::ALB ${alb_name} deve existir para publicar negocio; rode stage=alb mode=apply antes e confira as permissoes AWS."
+              exit 1
+            fi
+            if ! jq -e '.LoadBalancers | length == 1' /tmp/edge-business-alb.json > /dev/null; then
+              echo '::error::Esperado exatamente um ALB existente; rode stage=alb mode=apply antes.'
+              exit 1
+            fi
+            alb_arn=$(jq -er '.LoadBalancers[0].LoadBalancerArn' /tmp/edge-business-alb.json)
+            aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" > /tmp/edge-business-listeners.json
+            if ! listener_arn=$(jq -er '[.Listeners[] | select(.Protocol == "HTTP" and .Port == 80)] |
+              if length == 1 then .[0].ListenerArn else error("Esperado exatamente um listener HTTP/80") end' \
+              /tmp/edge-business-listeners.json); then
+              echo '::error::Publicacao de negocio exige exatamente um listener HTTP/80 no ALB existente.'
+              exit 1
+            fi
+            listener_pattern="^arn:aws:elasticloadbalancing:${region}:${account_id}:listener/app/${name_prefix}-edge/[0-9a-f]{16}/[0-9a-f]{16}$"
+            if [[ ! "$listener_arn" =~ $listener_pattern ]]; then
+              echo '::error::ARN do listener rejeitado pelo formato exigido em phase4/stacks/edge/variables.tf.'
+              exit 1
+            fi
+            jq --arg listener "$listener_arn" '.publish_business = true | .alb_listener_arn = $listener' \
+              phase4/stacks/edge/tfvars.json > /tmp/edge-business-tfvars.json
+            mv /tmp/edge-business-tfvars.json phase4/stacks/edge/tfvars.json
+            printf '\nListener de negocio observado antes do plan: `%s`.\n' "$listener_arn" >> "$GITHUB_STEP_SUMMARY"
           } 2>&1 | tee -a "$EDGE_LOG"
 
       - name: Terraform init
@@ -266,7 +309,7 @@ jobs:
           } 2>&1 | tee -a "$EDGE_LOG"
 
       - name: Apply ALB manifests
-        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        if: inputs.mode == 'apply' && (inputs.stage == 'alb' || inputs.stage == 'business')
         env:
           KUBECONFIG: /tmp/edge-kubeconfig
         run: |
@@ -297,7 +340,7 @@ jobs:
           } 2>&1 | tee -a "$EDGE_LOG"
 
       - name: Wait for ALB and discover HTTP listener
-        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        if: inputs.mode == 'apply' && (inputs.stage == 'alb' || inputs.stage == 'business')
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao aguardar ALB interno ou descobrir listener HTTP/80 unico; confira VPC, SG, controller e permissoes AWS."' ERR
@@ -343,7 +386,7 @@ jobs:
           } 2>&1 | tee -a "$EDGE_LOG"
 
       - name: Wait for healthy ALB targets
-        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        if: inputs.mode == 'apply' && (inputs.stage == 'alb' || inputs.stage == 'business')
         env:
           KUBECONFIG: /tmp/edge-kubeconfig
         run: |
@@ -407,6 +450,69 @@ jobs:
             fi
           } 2>&1 | tee -a "$EDGE_LOG"
 
+      - name: Smoke test business
+        if: inputs.mode == 'apply' && inputs.stage == 'business'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no smoke test de negocio; confira status HTTP e corpos resumidos no log."' ERR
+          {
+            api=$(jq -er '.edge_contract | select(.sensitive == false) | .value.api_endpoint |
+              select(type == "string" and startswith("https://"))' /tmp/edge-outputs.json)
+            paths=(/api/v1/clientes /actuator/health /.well-known/jwks.json)
+            statuses=(000 000 000)
+            deadline=$((SECONDS + 120))
+            ready=false
+            attempt=0
+            while (( SECONDS < deadline )); do
+              attempt=$((attempt + 1))
+              for index in "${!paths[@]}"; do
+                remaining=$((deadline - SECONDS))
+                if (( remaining <= 0 )); then break; fi
+                : > /tmp/edge-business-smoke-body.txt
+                if status=$(curl --silent --show-error --proto '=https' --connect-timeout 10 \
+                  --max-time "$remaining" --output /tmp/edge-business-smoke-body.txt \
+                  --write-out '%{http_code}' "${api%/}${paths[index]}"); then
+                  statuses[index]=$status
+                else
+                  statuses[index]=${status:-000}
+                fi
+                body=$(head -c 512 /tmp/edge-business-smoke-body.txt | tr '\r\n' '  ')
+                printf 'Tentativa %s; GET %s; status %s; corpo (ate 512 bytes): %s\n' \
+                  "$attempt" "${paths[index]}" "${statuses[index]}" "$body"
+              done
+              if [[ ( "${statuses[0]}" == 401 || "${statuses[0]}" == 403 ) &&
+                "${statuses[1]}" == 404 && "${statuses[2]}" == 200 ]]; then
+                ready=true
+                break
+              fi
+              if [[ "${statuses[0]}" == 2?? ]]; then break; fi
+              remaining=$((deadline - SECONDS))
+              if (( remaining > 0 )); then sleep "$((remaining < 5 ? remaining : 5))"; fi
+            done
+            {
+              printf '\n### Smoke test business\n\n| Rota GET | Esperado | Obtido |\n| --- | --- | --- |\n'
+              printf '| /api/v1/clientes sem Authorization | 401 ou 403 | %s |\n' "${statuses[0]}"
+              printf '| /actuator/health | 404 | %s |\n' "${statuses[1]}"
+              printf '| /.well-known/jwks.json | 200 | %s |\n' "${statuses[2]}"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if [[ "$ready" != true ]]; then
+              case "${statuses[0]}" in
+                401|403) ;;
+                404) echo '::error::rota nao publicada no API Gateway: GET /api/v1/clientes permaneceu 404.' ;;
+                502|503|504) echo '::error::VPC Link/ALB/pod inacessivel: GET /api/v1/clientes retornou erro de integracao.' ;;
+                2??) echo '::error::rota de negocio sem autenticacao: GET /api/v1/clientes aceitou requisicao sem Authorization.' ;;
+                *) echo "::error::Status inesperado em GET /api/v1/clientes: ${statuses[0]}." ;;
+              esac
+              if [[ "${statuses[1]}" != 404 ]]; then
+                echo "::error::GET /actuator/health deve permanecer nao publicado (404); obtido ${statuses[1]}."
+              fi
+              if [[ "${statuses[2]}" != 200 ]]; then
+                echo "::error::GET /.well-known/jwks.json deve continuar 200; obtido ${statuses[2]}."
+              fi
+              exit 1
+            fi
+          } 2>&1 | tee -a "$EDGE_LOG"
+
       - name: Failure diagnostics
         if: failure()
         env:
@@ -447,7 +553,7 @@ jobs:
             else
               printf '\nDiagnostico Lambda pulado: nome nao disponivel nos outputs do edge.\n'
             fi
-            if [[ "$EDGE_STAGE" == alb ]]; then
+            if [[ "$EDGE_STAGE" == alb || "$EDGE_STAGE" == business ]]; then
               printf '\n### Diagnosticos ALB\n\n```text\n'
               if test -s /tmp/infra_contract.json; then
                 if cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json); then
