@@ -7,6 +7,14 @@ on:
         description: Successful auth-artifact.yml run containing auth_release.json
         required: true
         type: string
+      stage:
+        description: Edge deployment stage
+        required: true
+        type: choice
+        options:
+          - auth
+          - alb
+        default: auth
       mode:
         description: Terraform operation for phase4/stacks/edge (publish_auth)
         required: true
@@ -39,6 +47,7 @@ jobs:
       AWS_REGION: us-east-1
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       EDGE_MODE: ${{ inputs.mode }}
+      EDGE_STAGE: ${{ inputs.stage }}
       AUTH_RELEASE_RUN_ID: ${{ inputs.auth_release_run_id }}
       EDGE_LOG: /tmp/edge.log
     steps:
@@ -144,11 +153,20 @@ jobs:
                 publish_auth: true, prepare_alb: false, publish_business: false, publish_webhook: false,
                 readiness: {}, auth_release: $release[0], alb_tls: null, alb_listener_arn: null}
             ' > phase4/stacks/edge/tfvars.json
+            if [[ "$EDGE_STAGE" == alb ]]; then
+              jq '.prepare_alb = true' phase4/stacks/edge/tfvars.json > /tmp/edge-alb-tfvars.json
+              mv /tmp/edge-alb-tfvars.json phase4/stacks/edge/tfvars.json
+            fi
             declared_variables=$(sed -n 's/^variable "\([^"]*\)".*/\1/p' phase4/stacks/edge/*.tf | sort)
             supplied_variables=$(jq -r 'keys[]' phase4/stacks/edge/tfvars.json | sort)
             [[ "$declared_variables" == "$supplied_variables" ]]
-            printf '### Edge publish_auth\n\nMode: `%s`; Auth release run: `%s`.\n\nBusiness, ALB e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
-              "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$EDGE_STAGE" == alb ]]; then
+              printf '### Edge prepare_alb\n\nMode: `%s`; Auth release run: `%s`.\n\nAuth mantido; ALB habilitado; business e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
+                "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '### Edge publish_auth\n\nMode: `%s`; Auth release run: `%s`.\n\nBusiness, ALB e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
+                "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+            fi
           } 2>&1 | tee -a "$EDGE_LOG"
 
       - name: Terraform init
@@ -247,6 +265,148 @@ jobs:
             printf '\n### Smoke test\n\nJWKS respondeu com pelo menos uma chave.\n' >> "$GITHUB_STEP_SUMMARY"
           } 2>&1 | tee -a "$EDGE_LOG"
 
+      - name: Apply ALB manifests
+        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        env:
+          KUBECONFIG: /tmp/edge-kubeconfig
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao exportar ou aplicar manifests ALB; confira contrato EKS, namespaces e controller."' ERR
+          {
+            terraform -chdir=phase4/stacks/edge output -json manifests > /tmp/edge-manifests-output.json
+            jq -e 'fromjson | select(.kind == "List" and (.items | length > 0))' \
+              /tmp/edge-manifests-output.json > /tmp/edge-manifests.json
+            jq -er '[.items[] | select(.kind == "Ingress" or .kind == "NetworkPolicy") |
+              .metadata.namespace] | unique |
+              if length > 0 and all(.[]; type == "string" and length > 0)
+                then .[] else error("Namespaces ausentes nos manifests ALB") end' \
+              /tmp/edge-manifests.json > /tmp/edge-alb-namespaces.txt
+            jq -e '[.items[] | select(.kind == "Ingress") | . as $ingress |
+              .spec.rules[].http.paths[] |
+              {namespace: $ingress.metadata.namespace, service: .backend.service.name,
+                port: .backend.service.port.number}] | unique |
+              select(length > 0 and all(.[];
+                (.service | type == "string" and length > 0) and (.port | type == "number")))' \
+              /tmp/edge-manifests.json > /tmp/edge-alb-services.json
+            cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
+            aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION"
+            while IFS= read -r namespace; do
+              kubectl get namespace "$namespace" -o name --request-timeout=30s
+            done < /tmp/edge-alb-namespaces.txt
+            kubectl apply -f /tmp/edge-manifests.json
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Wait for ALB and discover HTTP listener
+        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao aguardar ALB interno ou descobrir listener HTTP/80 unico; confira VPC, SG, controller e permissoes AWS."' ERR
+          {
+            alb_name=$(jq -er '.edge_contract | select(.sensitive == false) | .value.alb_name' /tmp/edge-outputs.json)
+            deadline=$((SECONDS + 300))
+            found=false
+            while (( SECONDS < deadline )); do
+              remaining=$((deadline - SECONDS))
+              if timeout "${remaining}s" aws elbv2 describe-load-balancers --names "$alb_name" \
+                > /tmp/edge-alb.json 2> /tmp/edge-alb-discovery-error.txt; then
+                jq -e '.LoadBalancers | length == 1' /tmp/edge-alb.json > /dev/null
+                found=true
+                break
+              elif ! grep -q 'LoadBalancerNotFound' /tmp/edge-alb-discovery-error.txt; then
+                cat /tmp/edge-alb-discovery-error.txt
+                echo '::error::Falha na consulta do ALB; somente LoadBalancerNotFound permite nova tentativa.'
+                exit 1
+              fi
+              remaining=$((deadline - SECONDS))
+              if (( remaining > 0 )); then sleep "$((remaining < 5 ? remaining : 5))"; fi
+            done
+            if [[ "$found" != true ]]; then
+              echo "::error::ALB ${alb_name} nao foi encontrado em ate 5 minutos."
+              exit 1
+            fi
+            alb_arn=$(jq -er '.LoadBalancers[0].LoadBalancerArn' /tmp/edge-alb.json)
+            aws elbv2 wait load-balancer-available --load-balancer-arns "$alb_arn"
+            aws elbv2 describe-load-balancers --load-balancer-arns "$alb_arn" > /tmp/edge-alb.json
+            jq -e --slurpfile infra /tmp/infra_contract.json --slurpfile edge /tmp/edge-outputs.json '
+              .LoadBalancers | length == 1 and all(.[];
+                .Scheme == "internal" and .Type == "application" and .State.Code == "active" and
+                .VpcId == $infra[0].vpc_id and .LoadBalancerName == $edge[0].edge_contract.value.alb_name and
+                .SecurityGroups == [$edge[0].edge_contract.value.alb_security_group_id])
+            ' /tmp/edge-alb.json > /dev/null
+            aws elbv2 describe-listeners --load-balancer-arn "$alb_arn" > /tmp/edge-alb-listeners.json
+            listener_arn=$(jq -er '[.Listeners[] | select(.Protocol == "HTTP" and .Port == 80)] |
+              if length == 1 then .[0].ListenerArn else error("Esperado exatamente um listener HTTP/80") end' \
+              /tmp/edge-alb-listeners.json)
+            alb_dns=$(jq -er '.LoadBalancers[0].DNSName' /tmp/edge-alb.json)
+            printf '\n### ALB interno\n\nDNS: `%s`\n\nListener HTTP/80: `%s`\n' \
+              "$alb_dns" "$listener_arn" | tee -a "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Wait for healthy ALB targets
+        if: inputs.mode == 'apply' && inputs.stage == 'alb'
+        env:
+          KUBECONFIG: /tmp/edge-kubeconfig
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao verificar targets do ALB; todos os servicos devem ter target group e todos os groups devem ter targets healthy em ate 5 minutos."' ERR
+          {
+            alb_arn=$(jq -er '.LoadBalancers[0].LoadBalancerArn' /tmp/edge-alb.json)
+            service_count=$(jq -er 'length | select(. > 0)' /tmp/edge-alb-services.json)
+            deadline=$((SECONDS + 300))
+            ready=false
+            target_rows=()
+            while (( SECONDS < deadline )); do
+              remaining=$((deadline - SECONDS))
+              timeout "${remaining}s" aws elbv2 describe-target-groups --load-balancer-arn "$alb_arn" \
+                > /tmp/edge-alb-target-groups.json
+              all_healthy=true
+              target_rows=()
+              group_count=$(jq -er '.TargetGroups | length' /tmp/edge-alb-target-groups.json)
+              if (( group_count < service_count )); then all_healthy=false; fi
+              jq -r '.TargetGroups[].TargetGroupArn' /tmp/edge-alb-target-groups.json > /tmp/edge-alb-target-group-arns.txt
+              while IFS= read -r group_arn; do
+                remaining=$((deadline - SECONDS))
+                if (( remaining <= 0 )); then all_healthy=false; break; fi
+                timeout "${remaining}s" aws elbv2 describe-target-health --target-group-arn "$group_arn" \
+                  > /tmp/edge-alb-target-health.json
+                total=$(jq -er '.TargetHealthDescriptions | length' /tmp/edge-alb-target-health.json)
+                healthy=$(jq -er '[.TargetHealthDescriptions[] | select(.TargetHealth.State == "healthy")] | length' \
+                  /tmp/edge-alb-target-health.json)
+                target_rows+=("| ${group_arn} | ${healthy}/${total} |")
+                if (( total == 0 || healthy != total )); then all_healthy=false; fi
+              done < /tmp/edge-alb-target-group-arns.txt
+              bindings='[]'
+              while IFS= read -r namespace; do
+                remaining=$((deadline - SECONDS))
+                if (( remaining <= 0 )); then all_healthy=false; break; fi
+                timeout "${remaining}s" kubectl get targetgroupbindings.elbv2.k8s.aws -n "$namespace" \
+                  -o json --request-timeout=30s > /tmp/edge-alb-namespace-bindings.json
+                bindings=$(jq -c --argjson existing "$bindings" '$existing + .items' /tmp/edge-alb-namespace-bindings.json)
+              done < /tmp/edge-alb-namespaces.txt
+              printf '%s\n' "$bindings" > /tmp/edge-alb-bindings.json
+              if ! jq -e --slurpfile groups /tmp/edge-alb-target-groups.json --slurpfile bindings /tmp/edge-alb-bindings.json '
+                all(.[]; . as $service | any($bindings[0][];
+                  .metadata.namespace == $service.namespace and .spec.serviceRef.name == $service.service and
+                  .spec.serviceRef.port == $service.port and
+                  (.spec.targetGroupARN as $arn | any($groups[0].TargetGroups[]; .TargetGroupArn == $arn))))
+              ' /tmp/edge-alb-services.json > /dev/null; then
+                all_healthy=false
+              fi
+              if [[ "$all_healthy" == true ]] && (( SECONDS < deadline )); then ready=true; break; fi
+              remaining=$((deadline - SECONDS))
+              if (( remaining > 0 )); then sleep "$((remaining < 5 ? remaining : 5))"; fi
+            done
+            {
+              printf '\n### Target groups ALB\n\nServicos derivados dos Ingresses: %s.\n\n' "$service_count"
+              printf '| Target group | Targets healthy/total |\n| --- | --- |\n'
+              if (( ${#target_rows[@]} > 0 )); then printf '%s\n' "${target_rows[@]}"; fi
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            if [[ "$ready" != true ]]; then
+              echo '::error::ALB nao ficou pronto em ate 5 minutos: servico sem target group, group vazio ou target nao healthy.'
+              exit 1
+            fi
+          } 2>&1 | tee -a "$EDGE_LOG"
+
       - name: Failure diagnostics
         if: failure()
         env:
@@ -255,6 +415,7 @@ jobs:
           TERRAFORM_OUTCOME: ${{ steps.terraform.outcome }}
           RELEASE_OUTCOME: ${{ steps.auth_release.outcome }}
           OUTPUTS_OUTCOME: ${{ steps.outputs.outcome }}
+          KUBECONFIG: /tmp/edge-kubeconfig
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao registrar diagnosticos de edge."' ERR
@@ -285,5 +446,38 @@ jobs:
               printf '```\n'
             else
               printf '\nDiagnostico Lambda pulado: nome nao disponivel nos outputs do edge.\n'
+            fi
+            if [[ "$EDGE_STAGE" == alb ]]; then
+              printf '\n### Diagnosticos ALB\n\n```text\n'
+              if test -s /tmp/infra_contract.json; then
+                if cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json); then
+                  aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION" || \
+                    echo '::error::Nao foi possivel preparar kubeconfig para diagnosticos ALB.'
+                fi
+                if alb_name=$(jq -er '.name_prefix + "-edge"' /tmp/infra_contract.json) &&
+                  aws elbv2 describe-load-balancers --names "$alb_name" > /tmp/edge-diagnostic-alb.json &&
+                  alb_arn=$(jq -er '.LoadBalancers[0].LoadBalancerArn' /tmp/edge-diagnostic-alb.json) &&
+                  aws elbv2 describe-target-groups --load-balancer-arn "$alb_arn" > /tmp/edge-diagnostic-groups.json; then
+                  while IFS= read -r group_arn; do
+                    printf '\nTarget group: %s\n' "$group_arn"
+                    if aws elbv2 describe-target-health --target-group-arn "$group_arn" > /tmp/edge-diagnostic-health.json; then
+                      cat /tmp/edge-diagnostic-health.json
+                      jq '[.TargetHealthDescriptions[] | select(.TargetHealth.State != "healthy") |
+                        {Target: .Target, State: .TargetHealth.State, Reason: .TargetHealth.Reason,
+                          Description: .TargetHealth.Description}]' /tmp/edge-diagnostic-health.json
+                    else
+                      echo "::error::Nao foi possivel consultar targets de ${group_arn}."
+                    fi
+                  done < <(jq -r '.TargetGroups[].TargetGroupArn' /tmp/edge-diagnostic-groups.json)
+                else
+                  echo '::error::Nao foi possivel descobrir ALB/target groups para diagnosticos.'
+                fi
+              fi
+              kubectl get ingress -A --request-timeout=30s || echo '::error::Nao foi possivel listar Ingresses.'
+              kubectl describe ingress -A --request-timeout=30s || echo '::error::Nao foi possivel descrever Ingresses.'
+              kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller \
+                --tail=100 --all-containers=true --request-timeout=30s || \
+                echo '::error::Nao foi possivel obter logs do ALB Controller.'
+              printf '```\n'
             fi
           } >> "$GITHUB_STEP_SUMMARY" 2>&1
