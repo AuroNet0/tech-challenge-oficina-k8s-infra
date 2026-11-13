@@ -4,6 +4,7 @@ from functools import wraps
 import json
 import re
 import sys
+import time
 import uuid
 
 from platform_secrets import check, equivalent_payload, parse_json, validate_canonical, validate_payload
@@ -78,13 +79,30 @@ class SecretsManagerReader:
         return False
 
     @sanitized_transport
-    def read(self, plan, name):
+    def read(self, plan, name, settle=False):
         self._context(plan)
         check(name in self.inventory, 'SOURCE_MISSING')
         arn = self.inventory[name]
         validate_arn(plan, name, arn)
+        retries_remaining = 9
+
+        def read_operation(operation, **arguments):
+            nonlocal retries_remaining
+            if not settle:
+                return operation(**arguments)
+            from botocore.exceptions import ClientError
+
+            while True:
+                try:
+                    return operation(**arguments)
+                except ClientError as error:
+                    if error.response.get('Error', {}).get('Code') != 'ResourceNotFoundException' or retries_remaining == 0:
+                        raise
+                    retries_remaining -= 1
+                    time.sleep(2)
+
         try:
-            description = self.client.describe_secret(SecretId=arn)
+            description = read_operation(self.client.describe_secret, SecretId=arn)
             check(description['ARN'] == arn and not description.get('DeletedDate'), 'SOURCE_OWNERSHIP_MISMATCH')
             if name == 'postgres-bootstrap-admin':
                 check(self.rds_reader is not None, 'RDS_SOURCE_NOT_VERIFIED')
@@ -99,7 +117,7 @@ class SecretsManagerReader:
                 check(description['Name'] == plan.canonical_name(name), 'SOURCE_OWNERSHIP_MISMATCH')
                 tags = {item['Key']: item['Value'] for item in description.get('Tags', [])}
                 check(all(tags.get(key) == value for key, value in canonical_tags(plan, name).items()), 'SOURCE_OWNERSHIP_MISMATCH')
-            response = self.client.get_secret_value(SecretId=arn, VersionStage='AWSCURRENT')
+            response = read_operation(self.client.get_secret_value, SecretId=arn, VersionStage='AWSCURRENT')
             check(response['ARN'] == arn and bool(response['VersionId']))
             payload = parse_json(response['SecretString'])
             if name == 'postgres-bootstrap-admin':
@@ -131,7 +149,7 @@ class SecretsManagerStore(SecretsManagerReader):
             validate_arn(plan, name, response['ARN'])
             self.inventory[name] = response['ARN']
             operation = 'verify'
-            check(self.read(plan, name)['payload'] == payload, 'SOURCE_NOT_VERIFIED')
+            check(self.read(plan, name, settle=True)['payload'] == payload, 'SOURCE_NOT_VERIFIED')
         except Exception as error:
             secret_failure_detail(name, operation, error)
             raise ContractError('SOURCE_CREATE_REJECTED') from None
