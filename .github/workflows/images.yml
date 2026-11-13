@@ -1,0 +1,258 @@
+name: Images (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      services_ref:
+        description: Branch, tag or commit to check out in each public service repository
+        required: true
+        type: string
+        default: homolog
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: phase4-demo-a-images
+  cancel-in-progress: false
+
+jobs:
+  services:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: os
+            repository: AuroNet0/tech-challenge-oficina-os-service
+            ecr: tc-oficina-p4-demo-a-os
+          - service: execution
+            repository: AuroNet0/tech-challenge-oficina-execution-service
+            ecr: tc-oficina-p4-demo-a-execution
+          - service: billing
+            repository: AuroNet0/tech-challenge-oficina-billing-service
+            ecr: tc-oficina-p4-demo-a-billing
+          - service: auth
+            repository: AuroNet0/tech-challenge-oficina-auth
+            ecr: tc-oficina-p4-demo-a-auth
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      SERVICE: ${{ matrix.service }}
+      SERVICE_REPOSITORY: ${{ matrix.repository }}
+      ECR_REPOSITORY: ${{ matrix.ecr }}
+      IMAGES_LOG: /tmp/images-${{ matrix.service }}.log
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ inputs.services_ref }}
+          persist-credentials: false
+
+      - name: Inspect service build
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Inspect service build'
+            test -n "$AWS_ROLE_ARN" || { echo '::error::Configure repository variable AWS_ROLE_ARN'; exit 1; }
+            mkdir -p /tmp/images
+            nl -ba Dockerfile
+            grep -Eiq '^FROM .+ AS build[[:space:]]*$' Dockerfile
+            grep -Eiq '^COPY --from=build[[:space:]]' Dockerfile || {
+              echo '::error::Dockerfile differs from the reviewed multi-stage build; review the service without modifying it here.'
+              exit 1
+            }
+            {
+              printf '### %s build\n\n' "$SERVICE"
+              printf 'Source: `%s@%s`.\n\n' "$SERVICE_REPOSITORY" "$(git rev-parse HEAD)"
+              case "$SERVICE" in
+                os) echo 'Dockerfile:1-17: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                execution) echo 'Dockerfile:1-18: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                billing) echo 'Dockerfile:1-12: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                auth) echo 'Dockerfile:1-11: Maven 3.9.9 / Java 21 build stage; packages the JAR inside Docker.' ;;
+              esac
+              printf '\nDirect docker build; no host Maven step required.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: images-${{ matrix.service }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build or reuse immutable ECR image
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Build or reuse immutable ECR image'
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            revision=$(git rev-parse HEAD)
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            image="${registry}/${ECR_REPOSITORY}:${revision}"
+            if digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageTag=$revision" --query 'imageDetails[0].imageDigest' \
+              --output text 2>/tmp/ecr-lookup.err); then
+              echo "Reusing existing tag $image"
+            elif grep -q '(ImageNotFoundException)' /tmp/ecr-lookup.err; then
+              aws ecr get-login-password --region "$AWS_REGION" | \
+                docker login --username AWS --password-stdin "$registry"
+              docker build --tag "$image" .
+              docker push "$image"
+              digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+                --image-ids "imageTag=$revision" --query 'imageDetails[0].imageDigest' --output text)
+            else
+              cat /tmp/ecr-lookup.err
+              exit 1
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            reference="${registry}/${ECR_REPOSITORY}@${digest}"
+            jq -n --arg service "$SERVICE" --arg image "$reference" \
+              '{($service): $image}' > "/tmp/images/${SERVICE}.json"
+            echo "$reference"
+            printf '\nImage: `%s`\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Resolve compose dependency digests
+        if: matrix.service == 'os' || matrix.service == 'execution'
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Resolve compose dependency digests'
+            if [[ "$SERVICE" == os ]]; then
+              dependencies=(postgres rabbitmq)
+            else
+              dependencies=(mongodb)
+            fi
+            for dependency in "${dependencies[@]}"; do
+              source=$(awk -v service="$dependency" '
+                $0 == "  " service ":" { selected = 1; next }
+                selected && /^  [^ ]/ { exit }
+                selected && /^    image: / { print NR ":" $2; exit }
+              ' compose.yaml)
+              test -n "$source"
+              line=${source%%:*}
+              tag=${source#*:}
+              case "$dependency:$tag" in
+                mongodb:mongo:8.0|rabbitmq:rabbitmq:4-management-alpine|postgres:postgres:17-alpine) ;;
+                *) echo "::error::Unreviewed compose image $dependency=$tag; review the selected services_ref"; exit 1 ;;
+              esac
+              image_name=${tag%%:*}
+              docker buildx imagetools inspect "docker.io/library/${tag}" > /tmp/dependency-inspect.txt
+              cat /tmp/dependency-inspect.txt
+              digest=$(awk '$1 == "Digest:" { print $2; exit }' /tmp/dependency-inspect.txt)
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              reference="docker.io/library/${image_name}@${digest}"
+              jq --arg key "$dependency" --arg image "$reference" '. + {($key): $image}' \
+                "/tmp/images/${SERVICE}.json" > /tmp/dependency-images.json
+              mv /tmp/dependency-images.json "/tmp/images/${SERVICE}.json"
+              echo "$reference"
+              printf '\n`%s`: `%s`, from `%s/compose.yaml:%s` at `%s` → `%s`.\n' \
+                "$dependency" "$tag" "$SERVICE_REPOSITORY" "$line" "$(git rev-parse HEAD)" "$reference" \
+                >> "$GITHUB_STEP_SUMMARY"
+            done
+            if [[ "$SERVICE" == os ]]; then
+              printf '\nPostgreSQL 17 follows OS compose.yaml:3 and Billing compose.yaml:5 and the platform contract. Auth compose.yaml:4 uses 16.6-alpine locally.\n' \
+                >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines (%s)\n\n```text\n' "$SERVICE"
+              if test -f "$IMAGES_LOG"; then tail -n 200 "$IMAGES_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Upload image fragment and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-part-${{ matrix.service }}
+          path: |
+            /tmp/images/${{ matrix.service }}.json
+            /tmp/images-${{ matrix.service }}.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  consolidate:
+    needs: services
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGES_LOG: /tmp/images-consolidate.log
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: images-part-*
+          path: /tmp/images-parts
+          merge-multiple: true
+
+      - name: Consolidate platform images
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Consolidate platform images'
+            for service in os execution billing auth; do
+              test -f "/tmp/images-parts/images/${service}.json"
+            done
+            jq -s 'add' /tmp/images-parts/images/{os,execution,billing,auth}.json > /tmp/images.json
+            jq -e '
+              (keys == ["auth", "billing", "execution", "mongodb", "os", "postgres", "rabbitmq"]) and
+              all(.[]; type == "string" and test("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$"))
+            ' /tmp/images.json
+            {
+              printf '### Platform images\n\nObject for the `images` variable in `phase4/stacks/platform/variables.tf`.\n\n```json\n'
+              cat /tmp/images.json
+              printf '```\n'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines (consolidation)\n\n```text\n'
+              if test -f "$IMAGES_LOG"; then tail -n 200 "$IMAGES_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Upload images.json and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: images.json
+          path: |
+            /tmp/images.json
+            /tmp/images-consolidate.log
+          if-no-files-found: warn
+          retention-days: 7
