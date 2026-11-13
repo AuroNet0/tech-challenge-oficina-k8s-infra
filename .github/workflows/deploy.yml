@@ -1,122 +1,935 @@
 name: Deploy
+
 on:
   workflow_dispatch:
     inputs:
-      plan_run:
-        description: Successful complete Plan run at this homolog commit
+      services_ref:
+        description: Branch, tag or commit in the public service repositories
+        type: string
+        default: homolog
+      mercado_pago_secret_arn:
+        description: ARN do segredo Mercado Pago
         type: string
         required: true
-      approved_plan_sha256:
-        description: SHA256 from complete Plan report
+      smoke_secret_arn:
+        description: ARN do segredo de smoke
         type: string
         required: true
+
 permissions:
+  id-token: write
   contents: read
   actions: read
+
 concurrency:
   group: phase4-demo-a-mutation
   cancel-in-progress: false
-env:
-  PLAN_ARTIFACT_KEY: ${{ secrets.PLAN_ARTIFACT_KEY }}
-  SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
-  GH_TOKEN: ${{ github.token }}
-  AWS_EC2_METADATA_DISABLED: 'true'
-  AWS_REGION: us-east-1
-  REPORT_DIR: actions-report/execution
-  PHASE: complete
-  NETWORK_PROBE_IMAGE: ${{ vars.NETWORK_PROBE_IMAGE }}
-  MONGODB_IMAGE: ${{ vars.MONGODB_IMAGE }}
-  RABBITMQ_IMAGE: ${{ vars.RABBITMQ_IMAGE }}
-  POSTGRES_IMAGE: ${{ vars.POSTGRES_IMAGE }}
-  EKS_VPC_CNI_VERSION: ${{ vars.EKS_VPC_CNI_VERSION }}
-  EKS_EBS_CSI_VERSION: ${{ vars.EKS_EBS_CSI_VERSION }}
-  EKS_POD_IDENTITY_VERSION: ${{ vars.EKS_POD_IDENTITY_VERSION }}
-  ALB_CERTIFICATE_ARN: ${{ vars.ALB_CERTIFICATE_ARN }}
-  ALB_SERVER_NAME: ${{ vars.ALB_SERVER_NAME }}
-  AUTH_SIGNING_SECRET_ARN: ${{ vars.AUTH_SIGNING_SECRET_ARN }}
-  MERCADO_PAGO_TEST_SECRET_ARN: ${{ vars.MERCADO_PAGO_TEST_SECRET_ARN }}
-  MERCADO_PAGO_SUCCESS_URL: ${{ vars.MERCADO_PAGO_SUCCESS_URL }}
-  MERCADO_PAGO_FAILURE_URL: ${{ vars.MERCADO_PAGO_FAILURE_URL }}
-  MERCADO_PAGO_PENDING_URL: ${{ vars.MERCADO_PAGO_PENDING_URL }}
-  NEW_RELIC_SECRET_ARN: ${{ vars.NEW_RELIC_SECRET_ARN }}
-  RECOVERY_ALARM_TOPIC_ARN: ${{ vars.RECOVERY_ALARM_TOPIC_ARN }}
-  E2E_FIXTURE_SECRET_ARN: ${{ vars.E2E_FIXTURE_SECRET_ARN }}
-  PLAN_RUN: ${{ inputs.plan_run }}
-  PLAN_HASH: ${{ inputs.approved_plan_sha256 }}
+
 jobs:
-  deploy:
-    environment: phase4-demo-a-bootstrap
-    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
-    timeout-minutes: 240
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    env:
-      EXECUTOR_ROLE: bootstrap
-      PROTECTED_ENVIRONMENT: phase4-demo-a-bootstrap
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/complete
-        id: execute
-        with:
-          operation: deploy-all
-      - name: Consolidate diagnostics
-        if: ${{ always() }}
-        env:
-          JOB_STATUS: ${{ job.status }}
-          STEPS_JSON: ${{ toJSON(steps) }}
-          OPERATION: deploy
-        run: |
-          if test -f scripts/environment-actions/finalize.py; then
-            python scripts/environment-actions/finalize.py
-          else
-            mkdir -p actions-report
-            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
-          fi
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: execution-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: actions-report/
-          retention-days: 7
-          if-no-files-found: error
-  report:
-    if: ${{ always() }}
-    needs: [deploy]
+  resolve:
+    name: 1 Resolve
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      os_sha: ${{ steps.revisions.outputs.os_sha }}
+      execution_sha: ${{ steps.revisions.outputs.execution_sha }}
+      billing_sha: ${{ steps.revisions.outputs.billing_sha }}
+      auth_sha: ${{ steps.revisions.outputs.auth_sha }}
     env:
-      OPERATION: deploy
-      JOB_RESULTS: ${{ toJSON(needs) }}
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_PAGER: ''
+      SERVICES_REF: ${{ inputs.services_ref }}
+      MERCADO_PAGO_SECRET_ARN: ${{ inputs.mercado_pago_secret_arn }}
+      SMOKE_SECRET_ARN: ${{ inputs.smoke_secret_arn }}
+      RESOLVE_LOG: /tmp/resolve.log
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validar AWS_ROLE_ARN
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::AWS_ROLE_ARN ausente ou invalido; configure a variavel de repositorio com um ARN de role IAM."' ERR
+          {
+            test -n "$AWS_ROLE_ARN"
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Credenciais AWS OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: resolve-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - name: Validar identidade e catalogo
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao validar conta/regiao do catalogo ou identidade STS da role AWS_ROLE_ARN."' ERR
+          {
+            catalog=phase4/environments/catalog.json
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            jq -e --arg account "$account_id" --arg region "$AWS_REGION" '
+              .environments["demo-a"] | .aws_account_id == $account and .aws_region == $region
+            ' "$catalog" > /dev/null
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::${account_id}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+            role_name=${AWS_ROLE_ARN##*/}
+            [[ "$caller_arn" == "arn:aws:sts::${account_id}:assumed-role/${role_name}/"* ]]
+            state_bucket=$(jq -er '.environments["demo-a"].backend_bucket' "$catalog")
+            printf 'ACCOUNT_ID=%s\nSTATE_BUCKET=%s\n' "$account_id" "$state_bucket" >> "$GITHUB_ENV"
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Validar ARNs e existencia dos segredos de entrada
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao validar os ARNs ou consultar os metadados dos segredos de entrada; nenhum valor foi lido."' ERR
+          {
+            account_id="$ACCOUNT_ID"
+            secret_pattern="^arn:aws:secretsmanager:${AWS_REGION}:${account_id}:secret:[A-Za-z0-9/_+=.@!-]+-[A-Za-z0-9]{6}$"
+            for input_name in MERCADO_PAGO_SECRET_ARN SMOKE_SECRET_ARN; do
+              secret_arn=${!input_name}
+              if [[ ! "$secret_arn" =~ $secret_pattern ]]; then
+                echo "::error::${input_name}: ARN invalido para a conta/regiao do catalogo."
+                exit 1
+              fi
+              if ! aws secretsmanager describe-secret --secret-id "$secret_arn" > /dev/null; then
+                echo "::error::${input_name}: segredo inexistente ou sem permissao para describe-secret."
+                exit 1
+              fi
+            done
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Verificar segredo auth-signing
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao verificar a existencia do segredo auth-signing."' ERR
+          {
+            if aws secretsmanager describe-secret --secret-id /oficina/phase4/demo-a/auth-signing \
+              > /dev/null 2> /tmp/resolve-auth-signing.err; then
+              echo 'Segredo auth-signing existente.'
+            elif grep -q 'ResourceNotFoundException' /tmp/resolve-auth-signing.err; then
+              echo '::error::O segredo /oficina/phase4/demo-a/auth-signing nao existe; crie-o antes de executar o deploy.'
+              exit 1
+            else
+              cat /tmp/resolve-auth-signing.err
+              echo '::warning::Nao foi possivel confirmar auth-signing por describe-secret; erro diferente de ResourceNotFoundException.'
+            fi
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Verificar buckets de artefatos e state
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Bucket de artefatos ou de state inexistente ou inacessivel; verifique head-bucket na conta do catalogo."' ERR
+          {
+            aws s3api head-bucket --bucket tc-oficina-p4-demo-a-artifacts --expected-bucket-owner "$ACCOUNT_ID"
+            aws s3api head-bucket --bucket "$STATE_BUCKET" --expected-bucket-owner "$ACCOUNT_ID"
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Resolver SHAs dos servicos
+        id: revisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao resolver services_ref em um SHA completo para um dos quatro repositorios."' ERR
+          {
+            test -n "$SERVICES_REF"
+            printf '### Revisions\n\n| repo | ref | sha |\n|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+            for service in os execution billing auth; do
+              case "$service" in
+                os) repository=AuroNet0/tech-challenge-oficina-os-service ;;
+                execution) repository=AuroNet0/tech-challenge-oficina-execution-service ;;
+                billing) repository=AuroNet0/tech-challenge-oficina-billing-service ;;
+                auth) repository=AuroNet0/tech-challenge-oficina-auth ;;
+              esac
+              sha=$(gh api "repos/${repository}/commits/${SERVICES_REF}" --jq .sha)
+              if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::SHA invalido ao resolver ${repository} para services_ref."
+                exit 1
+              fi
+              printf '%s_sha=%s\n' "$service" "$sha" >> "$GITHUB_OUTPUT"
+              printf '| %s | %s | `%s` |\n' "$repository" "$SERVICES_REF" "$sha" >> "$GITHUB_STEP_SUMMARY"
+            done
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao registrar os diagnosticos de resolve."' ERR
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines\n\n```text\n'
+              if test -f "$RESOLVE_LOG"; then tail -n 200 "$RESOLVE_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$RESOLVE_LOG"
+
+  infra:
+    name: 2 Infra
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+        working-directory: phase4/stacks/infra
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_WORKSPACE: default
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      INFRA_ACTION: apply
+      INFRA_LOG: /tmp/infra.log
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup
+
+      - name: Validar AWS_ROLE_ARN
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Validar AWS_ROLE_ARN'
+            test -n "$AWS_ROLE_ARN" || { echo '::error::Configure a variavel de repositorio AWS_ROLE_ARN'; exit 1; }
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: infra-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Generate Terraform inputs
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Generate Terraform inputs'
+            identity=$(aws sts get-caller-identity --output json)
+            account_id=$(jq -er '.Account' <<< "$identity")
+            caller_arn=$(jq -er '.Arn' <<< "$identity")
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::${account_id}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+            role_name=${AWS_ROLE_ARN##*/}
+            [[ "$caller_arn" == "arn:aws:sts::${account_id}:assumed-role/${role_name}/"* ]]
+            jq -n \
+              --arg account_id "$account_id" \
+              --arg revision "0000000000000000000000000000000000000000" \
+              --arg role_arn "$AWS_ROLE_ARN" \
+              '{environment_id: "demo-a", aws_region: "us-east-1",
+                aws_account_id: $account_id, git_revision: $revision,
+                availability_zones: ["us-east-1a", "us-east-1b"],
+                eks_admin_role_arn: $role_arn,
+                eks_public_access_cidrs: ["0.0.0.0/0"],
+                node_count: 2}' > tfvars.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Terraform init'
+            terraform init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config=key=phase4/environments/demo-a/infra.tfstate \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Terraform fmt
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Terraform fmt'
+            terraform fmt -check -diff
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Terraform validate
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Terraform validate'
+            terraform validate -no-color
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Terraform plan
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Terraform plan'
+            terraform plan -input=false -no-color -lock-timeout=5m \
+              -var-file=tfvars.json -out=tfplan
+            terraform show -no-color tfplan > plan.txt
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Terraform apply
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Terraform apply'
+            terraform apply -input=false -no-color -lock-timeout=5m tfplan
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Verify cluster access
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Verify cluster access'
+            aws eks update-kubeconfig --name tc-oficina-p4-demo-a --region us-east-1
+            kubectl get nodes -o wide
+            kubectl auth can-i '*' '*' --all-namespaces
+            kubectl get pods -A
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+      - name: Upload plan and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-${{ env.INFRA_ACTION }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            phase4/stacks/infra/plan.txt
+            /tmp/infra.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Failure diagnostics
+        if: failure()
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Terraform state list\n\n```text\n'
+              if command -v terraform >/dev/null && test -d phase4/stacks/infra; then
+                terraform -chdir=phase4/stacks/infra state list -no-color || true
+              else
+                echo 'Terraform or checkout unavailable.'
+              fi
+              printf '```\n\n### Last 200 log lines\n\n```text\n'
+              if test -f "$INFRA_LOG"; then tail -n 200 "$INFRA_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$INFRA_LOG"
+
+  auth_artifact:
+    name: 2 Auth artifact
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ARTIFACT_BUCKET: tc-oficina-p4-demo-a-artifacts
+      LAYER_NAME: tc-oficina-p4-demo-a-auth-bootstrap
+      AUTH_JAR: auth/target/tech-challenge-oficina-auth.jar
+      ARTIFACT_LOG: /tmp/auth-artifact.log
+    steps:
+      - name: Checkout infra
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout Auth
+        uses: actions/checkout@v4
+        with:
+          repository: AuroNet0/tech-challenge-oficina-auth
+          ref: ${{ needs.resolve.outputs.auth_sha }}
+          path: auth
+          persist-credentials: false
+
+      - name: Record revisions
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao registrar os SHAs completos da infra e do Auth ou AWS_ROLE_ARN ausente."' ERR
+          {
+            echo '::group::Record revisions'
+            test -n "$AWS_ROLE_ARN"
+            infra_sha=$(git rev-parse HEAD)
+            auth_sha=$(git -C auth rev-parse HEAD)
+            [[ "$infra_sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$auth_sha" =~ ^[0-9a-f]{40}$ ]]
+            printf 'INFRA_SHA=%s\nAUTH_SHA=%s\n' "$infra_sha" "$auth_sha" >> "$GITHUB_ENV"
+            printf 'Infra SHA: %s\nAuth SHA: %s\n' "$infra_sha" "$auth_sha"
+            printf '### Sources\n\nInfra: `%s`\n\nAuth: `%s`\n' "$infra_sha" "$auth_sha" >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: auth-artifact-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: |
+            auth/pom.xml
+            phase4/stacks/edge/lambda-bootstrap/pom.xml
+
+      - name: Ensure owned artifact bucket
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao preparar o bucket de artefatos; confira propriedade, regiao e permissoes S3."' ERR
+          {
+            echo '::group::Ensure owned artifact bucket'
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            printf 'AWS_ACCOUNT_ID=%s\n' "$account_id" >> "$GITHUB_ENV"
+            if aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" \
+              2>/tmp/auth-artifact-bucket.err; then
+              echo "Bucket existente e pertencente a conta STS: $ARTIFACT_BUCKET"
+            elif grep -Eq '\((404|NoSuchBucket|NotFound)\)' /tmp/auth-artifact-bucket.err; then
+              if ! aws s3api create-bucket --bucket "$ARTIFACT_BUCKET" --region us-east-1 \
+                2>/tmp/auth-artifact-bucket.err; then
+                cat /tmp/auth-artifact-bucket.err
+                echo '::error::Nao foi possivel criar o bucket; se o nome pertencer a outra conta, ele nao pode ser usado.'
+                exit 1
+              fi
+              aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id"
+            else
+              cat /tmp/auth-artifact-bucket.err
+              echo '::error::Propriedade do bucket nao confirmada: nome de outra conta ou acesso negado. Nenhuma configuracao sera alterada.'
+              exit 1
+            fi
+            location=$(aws s3api get-bucket-location --bucket "$ARTIFACT_BUCKET" \
+              --expected-bucket-owner "$account_id" --query LocationConstraint --output text)
+            [[ "$location" == None || "$location" == null || "$location" == us-east-1 ]]
+            aws s3api put-bucket-versioning --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" \
+              --versioning-configuration Status=Enabled
+            aws s3api put-public-access-block --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" \
+              --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+            aws s3api put-bucket-encryption --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" \
+              --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+            aws s3api get-bucket-versioning --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" |
+              jq -e '.Status == "Enabled"'
+            aws s3api get-public-access-block --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" |
+              jq -e '.PublicAccessBlockConfiguration | .BlockPublicAcls and .IgnorePublicAcls and .BlockPublicPolicy and .RestrictPublicBuckets'
+            aws s3api get-bucket-encryption --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$account_id" |
+              jq -e '.ServerSideEncryptionConfiguration.Rules | length > 0 and all(.[]; .ApplyServerSideEncryptionByDefault.SSEAlgorithm == "AES256")'
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Build Auth JAR
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no build do Auth; deve existir exatamente um JAR final chamado tech-challenge-oficina-auth.jar."' ERR
+          {
+            echo '::group::Build Auth JAR'
+            mvn -B -ntp -f auth/pom.xml clean package -DskipTests
+            mapfile -t jars < <(find auth/target -maxdepth 1 -type f -name '*.jar' ! -name 'original-*' -print)
+            [[ "${#jars[@]}" == 1 && "${jars[0]}" == "$AUTH_JAR" ]]
+            test -s "$AUTH_JAR"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Validate RDS CA bundle
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no download TLS ou validacao X.509/expiracao do bundle RDS."' ERR
+          {
+            echo '::group::Validate RDS CA bundle'
+            curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+              --connect-timeout 15 --max-time 60 \
+              https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem \
+              -o /tmp/auth-artifact-rds-ca.pem
+            mkdir -p /tmp/auth-artifact-certificates
+            awk -v directory=/tmp/auth-artifact-certificates '
+              /^-----BEGIN CERTIFICATE-----\r?$/ {
+                if (inside) { invalid = 1; exit 1 }
+                inside = 1; count++
+                destination = sprintf("%s/certificate-%03d.pem", directory, count)
+              }
+              /-----BEGIN / && !/^-----BEGIN CERTIFICATE-----\r?$/ { invalid = 1; exit 1 }
+              /-----END / && !/^-----END CERTIFICATE-----\r?$/ { invalid = 1; exit 1 }
+              inside { print > destination }
+              /^-----END CERTIFICATE-----\r?$/ {
+                if (!inside) { invalid = 1; exit 1 }
+                close(destination); inside = 0; next
+              }
+              !inside && /[^[:space:]]/ { invalid = 1; exit 1 }
+              END { if (invalid || inside || count < 1) exit 1 }
+            ' /tmp/auth-artifact-rds-ca.pem
+            for certificate in /tmp/auth-artifact-certificates/certificate-*.pem; do
+              openssl x509 -in "$certificate" -noout
+              openssl x509 -in "$certificate" -noout -checkend 0
+            done
+            sha256sum /tmp/auth-artifact-rds-ca.pem
+            printf '\n### RDS CA\n\nsem checksum pinado (decisão para demo)\n' >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Build bootstrap layer
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao compilar ou empacotar a layer bootstrap Java 21."' ERR
+          {
+            echo '::group::Build bootstrap layer'
+            mvn -B -ntp -f phase4/stacks/edge/lambda-bootstrap/pom.xml clean package
+            mkdir -p /tmp/auth-artifact-layer/bin /tmp/auth-artifact-layer/java/lib \
+              /tmp/auth-artifact-layer/auth-home/.postgresql
+            sed 's/\r$//' phase4/stacks/edge/lambda-bootstrap/bin/auth-bootstrap \
+              > /tmp/auth-artifact-layer/bin/auth-bootstrap
+            chmod 0755 /tmp/auth-artifact-layer/bin/auth-bootstrap
+            install -m 0644 phase4/stacks/edge/lambda-bootstrap/target/auth-bootstrap.jar \
+              /tmp/auth-artifact-layer/java/lib/auth-bootstrap.jar
+            install -m 0644 /tmp/auth-artifact-rds-ca.pem /tmp/auth-artifact-layer/auth-home/.postgresql/root.crt
+            test "$(stat -c '%a' /tmp/auth-artifact-layer/bin/auth-bootstrap)" = 755
+            test "$(head -n 1 /tmp/auth-artifact-layer/bin/auth-bootstrap)" = '#!/bin/bash'
+            if LC_ALL=C grep -q $'\r' /tmp/auth-artifact-layer/bin/auth-bootstrap; then
+              echo '::error::O wrapper da layer deve usar somente finais de linha LF.'
+              exit 1
+            fi
+            bash -n /tmp/auth-artifact-layer/bin/auth-bootstrap
+            (
+              cd /tmp/auth-artifact-layer
+              zip -X /tmp/layer.zip bin/auth-bootstrap java/lib/auth-bootstrap.jar auth-home/.postgresql/root.crt
+            )
+            unzip -t /tmp/layer.zip
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Publish and verify versioned Auth JAR
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao publicar ou verificar a versao S3 do JAR; VersionId real e SHA256 identico sao obrigatorios."' ERR
+          {
+            echo '::group::Publish and verify versioned Auth JAR'
+            key="auth/${AUTH_SHA}/auth.jar"
+            jar_checksum=$(openssl dgst -sha256 -binary "$AUTH_JAR" | openssl base64 -A)
+            aws s3api put-object --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --key "$key" --body "$AUTH_JAR" --server-side-encryption AES256 \
+              --checksum-algorithm SHA256 --checksum-sha256 "$jar_checksum" > /tmp/auth-artifact-upload.json
+            version_id=$(jq -er '.VersionId | select(type == "string" and length > 0 and . != "null")' /tmp/auth-artifact-upload.json)
+            aws s3api get-object --bucket "$ARTIFACT_BUCKET" --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+              --key "$key" --version-id "$version_id" /tmp/auth-artifact-readback.jar > /tmp/auth-artifact-readback.json
+            jq -e --arg version "$version_id" '.VersionId == $version' /tmp/auth-artifact-readback.json
+            readback_checksum=$(openssl dgst -sha256 -binary /tmp/auth-artifact-readback.jar | openssl base64 -A)
+            [[ "$jar_checksum" == "$readback_checksum" ]]
+            printf 'JAR_SHA256_BASE64=%s\n' "$jar_checksum" >> "$GITHUB_ENV"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Publish and verify bootstrap layer
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao publicar a layer ou verificar Content.CodeSha256 da versao publicada."' ERR
+          {
+            echo '::group::Publish and verify bootstrap layer'
+            layer_checksum=$(openssl dgst -sha256 -binary /tmp/layer.zip | openssl base64 -A)
+            aws lambda publish-layer-version --layer-name "$LAYER_NAME" --zip-file fileb:///tmp/layer.zip \
+              --description "phase4-demo-a:${INFRA_SHA}" --compatible-runtimes java21 \
+              --compatible-architectures x86_64 > /tmp/auth-artifact-layer-published.json
+            layer_arn=$(jq -er '.LayerVersionArn' /tmp/auth-artifact-layer-published.json)
+            version=$(jq -er '.Version | select(type == "number" and . > 0 and floor == .)' /tmp/auth-artifact-layer-published.json)
+            aws lambda get-layer-version --layer-name "$LAYER_NAME" --version-number "$version" \
+              > /tmp/auth-artifact-layer-verified.json
+            jq -e --arg checksum "$layer_checksum" --arg arn "$layer_arn" \
+              '.Content.CodeSha256 == $checksum and .LayerVersionArn == $arn' /tmp/auth-artifact-layer-verified.json
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Generate validated auth_release.json
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao gerar auth_release.json; os sete campos devem atender ao contrato exato do edge."' ERR
+          {
+            echo '::group::Generate validated auth_release.json'
+            version_id=$(jq -er '.VersionId' /tmp/auth-artifact-upload.json)
+            layer_arn=$(jq -er '.LayerVersionArn' /tmp/auth-artifact-layer-verified.json)
+            jq -en --arg bucket "$ARTIFACT_BUCKET" --arg revision "$AUTH_SHA" \
+              --arg key "auth/${AUTH_SHA}/auth.jar" --arg version_id "$version_id" \
+              --arg sha256_base64 "$JAR_SHA256_BASE64" --arg bootstrap_revision "$INFRA_SHA" \
+              --arg bootstrap_layer_arn "$layer_arn" --arg account "$AWS_ACCOUNT_ID" --arg region "$AWS_REGION" '
+              {bucket: $bucket, revision: $revision, key: $key, version_id: $version_id,
+                sha256_base64: $sha256_base64, bootstrap_revision: $bootstrap_revision,
+                bootstrap_layer_arn: $bootstrap_layer_arn} |
+              if .bucket == "tc-oficina-p4-demo-a-artifacts" and
+                (.revision | test("^[0-9a-f]{40}$")) and .key == ("auth/" + .revision + "/auth.jar") and
+                (.version_id | length > 0) and .version_id != "null" and
+                (.sha256_base64 | test("^[A-Za-z0-9+/]{43}=$")) and
+                (.bootstrap_revision | test("^[0-9a-f]{40}$")) and
+                (.bootstrap_layer_arn | test("^arn:aws:lambda:" + $region + ":" + $account +
+                  ":layer:tc-oficina-p4-demo-a-auth-bootstrap:[1-9][0-9]*$"))
+              then . else error("auth_release rejeitado pelo contrato edge") end
+            ' > /tmp/auth_release.json
+            {
+              printf '\n### auth_release.json\n\n```json\n'
+              cat /tmp/auth_release.json
+              printf '```\n'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+      - name: Upload auth_release.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth_release.json
+          path: /tmp/auth_release.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-artifact-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/auth-artifact.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao registrar os diagnosticos de auth-artifact."' ERR
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines\n\n```text\n'
+              if test -f "$ARTIFACT_LOG"; then tail -n 200 "$ARTIFACT_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$ARTIFACT_LOG"
+
+  images:
+    name: 3 Imagens (${{ matrix.service }})
+    needs: [infra, resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: os
+            sha: ${{ needs.resolve.outputs.os_sha }}
+            repository: AuroNet0/tech-challenge-oficina-os-service
+            ecr: tc-oficina-p4-demo-a-os
+          - service: execution
+            sha: ${{ needs.resolve.outputs.execution_sha }}
+            repository: AuroNet0/tech-challenge-oficina-execution-service
+            ecr: tc-oficina-p4-demo-a-execution
+          - service: billing
+            sha: ${{ needs.resolve.outputs.billing_sha }}
+            repository: AuroNet0/tech-challenge-oficina-billing-service
+            ecr: tc-oficina-p4-demo-a-billing
+          - service: auth
+            sha: ${{ needs.resolve.outputs.auth_sha }}
+            repository: AuroNet0/tech-challenge-oficina-auth
+            ecr: tc-oficina-p4-demo-a-auth
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      SERVICE: ${{ matrix.service }}
+      SERVICE_REPOSITORY: ${{ matrix.repository }}
+      ECR_REPOSITORY: ${{ matrix.ecr }}
+      IMAGES_LOG: /tmp/images-${{ matrix.service }}.log
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+
+      - name: Inspect service build
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Inspect service build'
+            test -n "$AWS_ROLE_ARN" || { echo '::error::Configure a variavel de repositorio AWS_ROLE_ARN'; exit 1; }
+            mkdir -p /tmp/images
+            nl -ba Dockerfile
+            grep -Eiq '^FROM .+ AS build[[:space:]]*$' Dockerfile
+            grep -Eiq '^COPY --from=build[[:space:]]' Dockerfile || {
+              echo '::error::Dockerfile difere do build multi-stage validado; revise o servico sem modifica-lo aqui.'
+              exit 1
+            }
+            {
+              printf '### %s build\n\n' "$SERVICE"
+              printf 'Source: `%s@%s`.\n\n' "$SERVICE_REPOSITORY" "$(git rev-parse HEAD)"
+              case "$SERVICE" in
+                os) echo 'Dockerfile:1-17: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                execution) echo 'Dockerfile:1-18: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                billing) echo 'Dockerfile:1-12: multi-stage Java 21; Maven wrapper packages the JAR inside Docker.' ;;
+                auth) echo 'Dockerfile:1-11: Maven 3.9.9 / Java 21 build stage; packages the JAR inside Docker.' ;;
+              esac
+              printf '\nDirect docker build; no host Maven step required.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: images-${{ matrix.service }}-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build or reuse immutable ECR image
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Build or reuse immutable ECR image'
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            revision=$(git rev-parse HEAD)
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            image="${registry}/${ECR_REPOSITORY}:${revision}"
+            if digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageTag=$revision" --query 'imageDetails[0].imageDigest' \
+              --output text 2>/tmp/ecr-lookup.err); then
+              echo "Reusing existing tag $image"
+            elif grep -q '(ImageNotFoundException)' /tmp/ecr-lookup.err; then
+              aws ecr get-login-password --region "$AWS_REGION" | \
+                docker login --username AWS --password-stdin "$registry"
+              docker build --tag "$image" .
+              docker push "$image"
+              digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+                --image-ids "imageTag=$revision" --query 'imageDetails[0].imageDigest' --output text)
+            else
+              cat /tmp/ecr-lookup.err
+              exit 1
+            fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            reference="${registry}/${ECR_REPOSITORY}@${digest}"
+            jq -n --arg service "$SERVICE" --arg image "$reference" \
+              '{($service): $image}' > "/tmp/images/${SERVICE}.json"
+            echo "$reference"
+            printf '\nImage: `%s`\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Resolve compose dependency digests
+        if: matrix.service == 'os' || matrix.service == 'execution'
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Resolve compose dependency digests'
+            if [[ "$SERVICE" == os ]]; then
+              dependencies=(postgres rabbitmq)
+            else
+              dependencies=(mongodb)
+            fi
+            for dependency in "${dependencies[@]}"; do
+              source=$(awk -v service="$dependency" '
+                $0 == "  " service ":" { selected = 1; next }
+                selected && /^  [^ ]/ { exit }
+                selected && /^    image: / { print NR ":" $2; exit }
+              ' compose.yaml)
+              test -n "$source"
+              line=${source%%:*}
+              tag=${source#*:}
+              case "$dependency:$tag" in
+                mongodb:mongo:8.0|rabbitmq:rabbitmq:4-management-alpine|postgres:postgres:17-alpine) ;;
+                *) echo "::error::Imagem compose nao validada $dependency=$tag; revise o SHA resolvido do servico"; exit 1 ;;
+              esac
+              image_name=${tag%%:*}
+              docker buildx imagetools inspect "docker.io/library/${tag}" > /tmp/dependency-inspect.txt
+              cat /tmp/dependency-inspect.txt
+              digest=$(awk '$1 == "Digest:" { print $2; exit }' /tmp/dependency-inspect.txt)
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              reference="docker.io/library/${image_name}@${digest}"
+              jq --arg key "$dependency" --arg image "$reference" '. + {($key): $image}' \
+                "/tmp/images/${SERVICE}.json" > /tmp/dependency-images.json
+              mv /tmp/dependency-images.json "/tmp/images/${SERVICE}.json"
+              echo "$reference"
+              printf '\n`%s`: `%s`, from `%s/compose.yaml:%s` at `%s` → `%s`.\n' \
+                "$dependency" "$tag" "$SERVICE_REPOSITORY" "$line" "$(git rev-parse HEAD)" "$reference" \
+                >> "$GITHUB_STEP_SUMMARY"
+            done
+            if [[ "$SERVICE" == os ]]; then
+              printf '\nPostgreSQL 17 follows OS compose.yaml:3 and Billing compose.yaml:5 and the platform contract. Auth compose.yaml:4 uses 16.6-alpine locally.\n' \
+                >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Upload image fragment and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-part-${{ matrix.service }}
+          path: |
+            /tmp/images/${{ matrix.service }}.json
+            /tmp/images-${{ matrix.service }}.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines (%s)\n\n```text\n' "$SERVICE"
+              if test -f "$IMAGES_LOG"; then tail -n 200 "$IMAGES_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+  images_consolidate:
+    name: 3 Consolidar imagens
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGES_LOG: /tmp/images-consolidate.log
+    steps:
+      - name: Credenciais AWS OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: images-consolidate-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
       - uses: actions/download-artifact@v4
         with:
-          pattern: '*-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}'
-          path: all-diagnostics
-      - name: Consolidate diagnostics
-        if: ${{ always() }}
-        env:
-          JOB_STATUS: ${{ job.status }}
-          STEPS_JSON: ${{ toJSON(steps) }}
+          pattern: images-part-*
+          path: /tmp/images-parts
+          merge-multiple: true
+
+      - name: Consolidate platform images
         run: |
-          if test -f scripts/environment-actions/complete_report.py; then
-            python scripts/environment-actions/complete_report.py
-          else
-            mkdir -p all-diagnostics
-            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > all-diagnostics/report.json
-          fi
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
+          set -euo pipefail
+          {
+            echo '::group::Consolidate platform images'
+            for service in os execution billing auth; do
+              test -f "/tmp/images-parts/images/${service}.json"
+            done
+            jq -s 'add' /tmp/images-parts/images/{os,execution,billing,auth}.json > /tmp/images.json
+            jq -e '
+              (keys == ["auth", "billing", "execution", "mongodb", "os", "postgres", "rabbitmq"]) and
+              all(.[]; type == "string" and test("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$"))
+            ' /tmp/images.json
+            {
+              printf '### Platform images\n\nObject for the `images` variable in `phase4/stacks/platform/variables.tf`.\n\n```json\n'
+              cat /tmp/images.json
+              printf '```\n'
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+      - name: Upload images.json and log
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: deploy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: all-diagnostics/
-          if-no-files-found: error
+          name: images.json
+          path: |
+            /tmp/images.json
+            /tmp/images-consolidate.log
+          if-no-files-found: warn
           retention-days: 7
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines (consolidation)\n\n```text\n'
+              if test -f "$IMAGES_LOG"; then tail -n 200 "$IMAGES_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$IMAGES_LOG"
+
+  summary-parte-1:
+    name: summary-parte-1
+    needs: [resolve, infra, auth_artifact, images, images_consolidate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      JOB_RESULTS: ${{ toJSON(needs) }}
+      SUMMARY_LOG: /tmp/summary-parte-1.log
+    steps:
+      - name: Credenciais AWS OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: summary-parte-1-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - name: Resumo da parte 1
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao escrever o resumo das fases da parte 1."' ERR
+          {
+            {
+              printf '### Deploy - Parte 1\n\n| fase | resultado |\n|---|---|\n'
+              jq -r 'to_entries[] | "| " + .key + " | " + .value.result + " |"' <<< "$JOB_RESULTS"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$SUMMARY_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao registrar os diagnosticos de summary-parte-1."' ERR
+          {
+            echo '::group::Failure diagnostics'
+            {
+              printf '### Last 200 log lines\n\n```text\n'
+              if test -f "$SUMMARY_LOG"; then tail -n 200 "$SUMMARY_LOG"; fi
+              printf '```\n'
+            } 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '::endgroup::'
+          } 2>&1 | tee -a "$SUMMARY_LOG"
