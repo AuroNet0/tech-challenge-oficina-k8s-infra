@@ -158,7 +158,7 @@ def external_payment(source, plan, arn):
     contracts.check(response['ARN'] == arn and bool(response['VersionId']), 'EXTERNAL_SOURCE_ARN_REJECTED')
     payload = contracts.parse_json(response['SecretString'])
     contracts.validate_payload(plan, 'billing-mercado-pago', payload)
-    contracts.check(payload['access-token'].startswith('TEST-') and bool(payload['webhook-secret']),
+    contracts.check(payload['access-token'].startswith(('TEST-', 'APP_USR-')) and bool(payload['webhook-secret']),
                     'MERCADO_PAGO_TEST_CREDENTIAL_REQUIRED')
     return payload
 
@@ -305,8 +305,18 @@ def main():
     arguments = parser.parse_args()
     try:
         arguments.operation(arguments)
-    except Exception:
-        print('PLATFORM_SECRETS_OPERATION_REJECTED', file=sys.stderr)
+    except Exception as error:
+        reason = 'UNEXPECTED_ERROR'
+        if (isinstance(error, contracts.ContractError) and error.args and isinstance(error.args[0], str)
+                and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', error.args[0])):
+            reason = error.args[0]
+        step = arguments.command
+        error_traceback = error.__traceback__
+        while error_traceback is not None:
+            if error_traceback.tb_frame.f_code.co_filename == __file__:
+                step = error_traceback.tb_frame.f_code.co_name
+            error_traceback = error_traceback.tb_next
+        print(f'PLATFORM_SECRETS_OPERATION_REJECTED step={step} reason={reason}', file=sys.stderr)
         return 1
     return 0
 
