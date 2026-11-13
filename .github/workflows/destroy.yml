@@ -1,104 +1,583 @@
-name: Destroy
+name: Destroy (temporary)
+
 on:
   workflow_dispatch:
     inputs:
-      confirmation:
-        description: Type DESTROY demo-a
+      confirm:
+        description: Digite exatamente destroy demo-a
         required: true
         type: string
+      images_run_id:
+        description: Successful images.yml run containing images.json
+        required: true
+        type: string
+
 permissions:
+  id-token: write
   contents: read
   actions: read
+
 concurrency:
   group: phase4-demo-a-mutation
   cancel-in-progress: false
+
 jobs:
   destroy:
-    environment: phase4-demo-a-destroy
-    runs-on: ${{ fromJSON(vars.PHASE4_EXECUTOR_RUNNER_LABELS || '["ubuntu-latest"]') }}
-    timeout-minutes: 180
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-    env:
-      EXECUTOR_ROLE: destroy
-      PROTECTED_ENVIRONMENT: phase4-demo-a-destroy
-      CONFIRMATION: ${{ inputs.confirmation }}
-      OPERATION: destroy
-      AWS_EC2_METADATA_DISABLED: 'true'
-      AWS_REGION: us-east-1
-      REPORT_DIR: actions-report/execution
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-      - name: Validate explicit destruction approval
-        run: python scripts/environment-actions/pipeline.py gate
-      - name: Complete owned teardown and destroy
-        id: execute
-        run: python scripts/environment-actions/complete.py destroy-all
-      - name: Independently verify endpoint closure
-        if: ${{ always() }}
-        env:
-          REPORT_DIR: actions-report/endpoint-close
-        run: python scripts/environment-actions/complete.py close
-      - name: Consolidate diagnostics
-        if: ${{ always() }}
-        env:
-          JOB_STATUS: ${{ job.status }}
-          STEPS_JSON: ${{ toJSON(steps) }}
-          OPERATION: destroy
-        run: |
-          if test -f scripts/environment-actions/finalize.py; then
-            python scripts/environment-actions/finalize.py
-          else
-            mkdir -p actions-report
-            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > actions-report/report.json
-          fi
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: execution-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: actions-report/
-          retention-days: 7
-          if-no-files-found: error
-  report:
-    if: ${{ always() }}
-    needs: [destroy]
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
     env:
-      OPERATION: destroy
-      JOB_RESULTS: ${{ toJSON(needs) }}
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_WORKSPACE: default
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_PAGER: ''
+      DESTROY_CONFIRM: ${{ inputs.confirm }}
+      IMAGES_RUN_ID: ${{ inputs.images_run_id }}
+      DESTROY_LOG: /tmp/destroy.log
     steps:
-      - uses: actions/checkout@v4
+      - name: '[1/4] Checkout'
+        id: checkout
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: '*-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}'
-          path: all-diagnostics
-      - name: Consolidate diagnostics
-        if: ${{ always() }}
+
+      - name: '[1/4] Validar confirmacao e run das imagens'
+        id: confirmation
         env:
-          JOB_STATUS: ${{ job.status }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[1/4] Falha ao validar confirmacao, AWS_ROLE_ARN ou run de images.yml."' ERR
+          {
+            if [[ "$DESTROY_CONFIRM" != 'destroy demo-a' ]]; then
+              echo '::error::Digite exatamente "destroy demo-a" no input confirm; nenhum recurso foi removido.'
+              exit 1
+            fi
+            test -n "$AWS_ROLE_ARN"
+            [[ "$IMAGES_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGES_RUN_ID}" > /tmp/destroy-images-run.json
+            jq -e '.path == ".github/workflows/images.yml" and
+              .status == "completed" and .conclusion == "success"' /tmp/destroy-images-run.json
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[1/4] Credenciais AWS OIDC'
+        id: credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: destroy-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - name: '[1/4] Terraform 1.15.8'
+        id: terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: '[1/4] Baixar images.json'
+        id: images
+        uses: actions/download-artifact@v4
+        with:
+          name: images.json
+          run-id: ${{ inputs.images_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/destroy-images
+
+      - name: '[1/4] Validar identidade e inicializar states'
+        id: states
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[1/4] Falha ao validar conta/regiao, inicializar states ou recuperar contratos; nao prossiga sem os contratos reais."' ERR
+          {
+            catalog=phase4/environments/catalog.json
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            caller_arn=$(aws sts get-caller-identity --query Arn --output text)
+            jq -e --arg account "$account_id" --arg region "$AWS_REGION" '
+              .environments["demo-a"] | .aws_account_id == $account and .aws_region == $region
+            ' "$catalog" > /dev/null
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::${account_id}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+            role_name=${AWS_ROLE_ARN##*/}
+            [[ "$caller_arn" == "arn:aws:sts::${account_id}:assumed-role/${role_name}/"* ]]
+            name_prefix=$(jq -er '.environments["demo-a"] | .resource_prefix + "-" + .project_name + "-p4-demo-a"' "$catalog")
+            state_bucket=$(jq -er '.environments["demo-a"].backend_bucket' "$catalog")
+            printf 'ACCOUNT_ID=%s\nNAME_PREFIX=%s\nSTATE_BUCKET=%s\n' "$account_id" "$name_prefix" "$state_bucket" >> "$GITHUB_ENV"
+            for stack in edge platform infra; do
+              state_key=$(jq -er --arg stack "$stack" '.environments["demo-a"].state_keys[$stack]' "$catalog")
+              terraform -chdir="phase4/stacks/${stack}" init -input=false -no-color \
+                -backend-config="bucket=${state_bucket}" -backend-config="key=${state_key}" \
+                -backend-config="region=${AWS_REGION}" -backend-config=encrypt=true -backend-config=use_lockfile=true
+              present=false
+              if aws s3api head-object --bucket "$state_bucket" --key "$state_key" > /dev/null 2> /tmp/destroy-state-error; then
+                terraform -chdir="phase4/stacks/${stack}" state list > "/tmp/destroy-${stack}-resources"
+                if [[ -s "/tmp/destroy-${stack}-resources" ]]; then present=true; fi
+                terraform -chdir="phase4/stacks/${stack}" output -json > "/tmp/destroy-${stack}-outputs.json"
+              else
+                if ! grep -Eq '\(404\)|NoSuchKey|NotFound' /tmp/destroy-state-error; then
+                  cat /tmp/destroy-state-error
+                  exit 1
+                fi
+                printf '{}\n' > "/tmp/destroy-${stack}-outputs.json"
+              fi
+              printf '%s_present=%s\n' "$stack" "$present" >> "$GITHUB_OUTPUT"
+            done
+            jq '.platform_contract.value // null' /tmp/destroy-infra-outputs.json > /tmp/infra_contract.json
+            jq '.edge_contract.value // null' /tmp/destroy-platform-outputs.json > /tmp/destroy-platform-contract.json
+            if [[ -s /tmp/destroy-edge-resources ]]; then
+              jq -e 'type == "object"' /tmp/destroy-platform-contract.json > /dev/null
+            fi
+            if [[ -s /tmp/destroy-platform-resources || -s /tmp/destroy-edge-resources ]]; then
+              jq -e --arg account "$account_id" --arg region "$AWS_REGION" --arg prefix "$name_prefix" '
+                .environment_id == "demo-a" and .aws_account_id == $account and
+                .aws_region == $region and .name_prefix == $prefix
+              ' /tmp/infra_contract.json > /dev/null
+            fi
+            jq -e '(keys == ["auth", "billing", "execution", "mongodb", "os", "postgres", "rabbitmq"]) and
+              all(.[]; type == "string" and test("^[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}$"))' \
+              /tmp/destroy-images/images.json > /dev/null
+            aws ec2 describe-vpcs --output json > /tmp/destroy-vpcs-observed.json
+            jq --slurpfile infra /tmp/infra_contract.json --arg prefix "$name_prefix" '
+              ([.Vpcs[] | select(any(.Tags[]?; (.Key == "EnvironmentId" and .Value == "demo-a") or
+                (.Key == "Name" and .Value == ($prefix + "-vpc")))) | .VpcId] +
+                [$infra[0].vpc_id // empty]) | unique
+            ' /tmp/destroy-vpcs-observed.json > /tmp/destroy-vpc-ids.json
+            printf '### [1/4] Preparacao\n\nConta: `%s`; regiao: `%s`; prefixo: `%s`.\n' \
+              "$account_id" "$AWS_REGION" "$name_prefix" >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[1/4] Inventariar cluster, ALB, target groups e volumes'
+        id: inventory
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[1/4] Falha no inventario EKS/ALB/PVs; erros de permissao nao sao tratados como recurso ausente."' ERR
+          {
+            printf '[]\n' > /tmp/destroy-albs.json
+            printf '[]\n' > /tmp/destroy-target-groups.json
+            printf '[]\n' > /tmp/destroy-volumes.json
+            if aws eks describe-cluster --name "$NAME_PREFIX" --output json > /tmp/destroy-cluster.json 2> /tmp/destroy-cluster-error; then
+              echo 'cluster_present=true' >> "$GITHUB_OUTPUT"
+              aws eks update-kubeconfig --name "$NAME_PREFIX" --region "$AWS_REGION"
+              if aws elbv2 describe-load-balancers --names "${NAME_PREFIX}-edge" --output json > /tmp/destroy-alb-observed.json 2> /tmp/destroy-alb-error; then
+                jq '[.LoadBalancers[].LoadBalancerArn]' /tmp/destroy-alb-observed.json > /tmp/destroy-albs.json
+                alb_arn=$(jq -er '.[0]' /tmp/destroy-albs.json)
+                aws elbv2 describe-target-groups --load-balancer-arn "$alb_arn" --output json | \
+                  jq '[.TargetGroups[].TargetGroupArn]' > /tmp/destroy-target-groups.json
+              elif ! grep -q 'LoadBalancerNotFound' /tmp/destroy-alb-error; then
+                cat /tmp/destroy-alb-error
+                exit 1
+              fi
+              aws elbv2 describe-target-groups --output json > /tmp/destroy-all-target-groups.json
+              jq --slurpfile saved /tmp/destroy-target-groups.json --slurpfile vpcs /tmp/destroy-vpc-ids.json '
+                ($saved[0] + [.TargetGroups[] | select(.VpcId as $vpc | $vpcs[0] | index($vpc) != null) |
+                  .TargetGroupArn]) | unique
+              ' /tmp/destroy-all-target-groups.json > /tmp/destroy-target-groups-next.json
+              mv /tmp/destroy-target-groups-next.json /tmp/destroy-target-groups.json
+              kubectl get pv -o json > /tmp/destroy-pvs.json
+              jq '[.items[] | .spec.csi.volumeHandle? // empty] | unique' /tmp/destroy-pvs.json > /tmp/destroy-volumes.json
+              jq -e 'all(.[]; test("^vol-[0-9a-f]+$"))' /tmp/destroy-volumes.json > /dev/null
+              aws ec2 describe-volumes --filters Name=tag:EnvironmentId,Values=demo-a --output json > /tmp/destroy-ebs-observed.json
+              jq --arg prefix "$NAME_PREFIX" --slurpfile saved /tmp/destroy-volumes.json '
+                ($saved[0] + [.Volumes[] | select(all(.Tags[]?;
+                  .Key != "Name" or .Value != ($prefix + "-node"))) | .VolumeId]) | unique' \
+                /tmp/destroy-ebs-observed.json > /tmp/destroy-volumes-next.json
+              mv /tmp/destroy-volumes-next.json /tmp/destroy-volumes.json
+              echo 'Cluster existente; fase 2 habilitada.' >> "$GITHUB_STEP_SUMMARY"
+            elif grep -q 'ResourceNotFoundException' /tmp/destroy-cluster-error; then
+              echo 'cluster_present=false' >> "$GITHUB_OUTPUT"
+              echo 'Cluster ausente: fase 2 sera pulada; a auditoria independente verificara vazamentos.' >> "$GITHUB_STEP_SUMMARY"
+            else
+              cat /tmp/destroy-cluster-error
+              exit 1
+            fi
+            {
+              printf '\n| Inventario | ARN / ID |\n|---|---|\n'
+              for resource in albs target-groups volumes vpc-ids; do
+                jq -r --arg resource "$resource" '.[] | "| " + $resource + " | `" + . + "` |"' "/tmp/destroy-${resource}.json"
+              done
+            } >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[2/4] Remover Ingresses e configuracao edge'
+        id: ingresses
+        if: steps.inventory.outputs.cluster_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[2/4] Falha ao remover Ingresses/IngressClass/NetworkPolicies; mantenha o controller vivo e nao force finalizers."' ERR
+          {
+            if [[ -n "$(kubectl get namespace "$NAME_PREFIX" --ignore-not-found -o name)" ]]; then
+              kubectl delete ingress --all -n "$NAME_PREFIX" --wait=true --timeout=300s
+              kubectl delete networkpolicy os-from-edge execution-from-edge billing-from-edge \
+                -n "$NAME_PREFIX" --ignore-not-found --wait=true --timeout=300s
+            fi
+            kubectl delete ingressclass "${NAME_PREFIX}-edge" --ignore-not-found --wait=true --timeout=300s
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[2/4] Esperar remocao do ALB, target groups e bindings'
+        id: alb_cleanup
+        if: steps.inventory.outputs.cluster_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[2/4] Falha aguardando ALB/target groups/TargetGroupBindings; nao remova o controller nem force finalizers."' ERR
+          {
+            deadline=$((SECONDS + 600))
+            while :; do
+              : > /tmp/destroy-alb-residuals
+              while IFS= read -r alb_arn; do
+                if aws elbv2 describe-load-balancers --load-balancer-arns "$alb_arn" > /dev/null 2> /tmp/destroy-probe-error; then
+                  printf 'ALB: %s\n' "$alb_arn" >> /tmp/destroy-alb-residuals
+                elif ! grep -q 'LoadBalancerNotFound' /tmp/destroy-probe-error; then
+                  cat /tmp/destroy-probe-error
+                  exit 1
+                fi
+              done < <(jq -r '.[]' /tmp/destroy-albs.json)
+              while IFS= read -r target_group; do
+                if aws elbv2 describe-target-groups --target-group-arns "$target_group" > /dev/null 2> /tmp/destroy-probe-error; then
+                  printf 'Target group: %s\n' "$target_group" >> /tmp/destroy-alb-residuals
+                elif ! grep -q 'TargetGroupNotFound' /tmp/destroy-probe-error; then
+                  cat /tmp/destroy-probe-error
+                  exit 1
+                fi
+              done < <(jq -r '.[]' /tmp/destroy-target-groups.json)
+              kubectl api-resources --api-group=elbv2.k8s.aws -o name > /tmp/destroy-binding-resources
+              if grep -q '^targetgroupbindings' /tmp/destroy-binding-resources; then
+                kubectl get targetgroupbindings.elbv2.k8s.aws -A -o json > /tmp/destroy-bindings.json
+                jq -r --arg namespace "$NAME_PREFIX" --slurpfile groups /tmp/destroy-target-groups.json '
+                  .items[] | select(.metadata.namespace == $namespace or
+                    (.spec.targetGroupARN as $arn | $groups[0] | index($arn) != null)) |
+                  "TargetGroupBinding: " + .metadata.namespace + "/" + .metadata.name
+                ' /tmp/destroy-bindings.json >> /tmp/destroy-alb-residuals
+              fi
+              if [[ ! -s /tmp/destroy-alb-residuals ]]; then break; fi
+              if (( SECONDS >= deadline )); then
+                while IFS= read -r residual; do echo "::error::[2/4] Recurso ainda presente: ${residual}"; done < /tmp/destroy-alb-residuals
+                exit 1
+              fi
+              cat /tmp/destroy-alb-residuals
+              sleep 15
+            done
+            echo '### [2/4] ALB, target groups inventariados e bindings removidos antes do destroy do edge.' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[2/4] Remover workloads, PVCs e esperar volumes EBS'
+        id: volumes_cleanup
+        if: steps.inventory.outputs.cluster_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[2/4] Falha ao remover workloads/PVCs ou aguardar EBS; mantenha CSI vivo e nao force finalizers."' ERR
+          {
+            if [[ -n "$(kubectl get namespace "$NAME_PREFIX" --ignore-not-found -o name)" ]]; then
+              kubectl get deployment,statefulset -n "$NAME_PREFIX" -o name > /tmp/destroy-workloads
+              while IFS= read -r workload; do
+                kubectl scale "$workload" -n "$NAME_PREFIX" --replicas=0
+              done < /tmp/destroy-workloads
+              kubectl delete deployment,job,statefulset --all -n "$NAME_PREFIX" --wait=true --timeout=300s
+              kubectl delete pvc --all -n "$NAME_PREFIX" --wait=true --timeout=300s
+            fi
+            deadline=$((SECONDS + 600))
+            while :; do
+              : > /tmp/destroy-volume-residuals
+              while IFS= read -r volume_id; do
+                if aws ec2 describe-volumes --volume-ids "$volume_id" > /dev/null 2> /tmp/destroy-volume-error; then
+                  echo "$volume_id" >> /tmp/destroy-volume-residuals
+                elif ! grep -q 'InvalidVolume.NotFound' /tmp/destroy-volume-error; then
+                  cat /tmp/destroy-volume-error
+                  exit 1
+                fi
+              done < <(jq -r '.[]' /tmp/destroy-volumes.json)
+              if [[ ! -s /tmp/destroy-volume-residuals ]]; then break; fi
+              if (( SECONDS >= deadline )); then
+                while IFS= read -r volume_id; do echo "::error::[2/4] Volume EBS ainda presente: ${volume_id}"; done < /tmp/destroy-volume-residuals
+                exit 1
+              fi
+              cat /tmp/destroy-volume-residuals
+              sleep 15
+            done
+            echo 'PVCs e volumes EBS inventariados removidos com CSI ativo.' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[2/4] Helm 3.17.3'
+        id: helm
+        if: steps.inventory.outputs.cluster_present == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: '[2/4] Remover releases do repo e namespaces'
+        id: namespaces_cleanup
+        if: steps.inventory.outputs.cluster_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[2/4] Falha ao desinstalar Helm ou remover namespaces; nenhum finalizer sera forcado."' ERR
+          {
+            helm list --all --all-namespaces -o json > /tmp/destroy-helm-releases.json
+            jq -r --arg prefix "$NAME_PREFIX" '.[] | select(
+              (.name == ($prefix + "-alb") and .namespace == "kube-system") or
+              (.name == ($prefix + "-observability") and .namespace == ($prefix + "-observability"))) |
+              [.name, .namespace] | @tsv' /tmp/destroy-helm-releases.json > /tmp/destroy-owned-releases
+            while IFS=$'\t' read -r release namespace; do
+              helm uninstall "$release" --namespace "$namespace" --ignore-not-found --wait --timeout 5m
+            done < /tmp/destroy-owned-releases
+            kubectl delete namespace "$NAME_PREFIX" "${NAME_PREFIX}-observability" --ignore-not-found --wait=true --timeout=300s
+            echo 'Releases ALB/observability do repo e namespaces removidos; addons CSI permanecem ate o destroy da platform.' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[3/4] Planejar e destruir edge'
+        id: edge_destroy
+        if: steps.states.outputs.edge_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[3/4] Falha no destroy do edge; confira o plano e dependencias de ENIs/SGs. A platform ainda nao foi destruida."' ERR
+          {
+            jq -n --slurpfile infra /tmp/infra_contract.json --slurpfile platform /tmp/destroy-platform-contract.json '
+              {environment_id: $infra[0].environment_id, aws_region: $infra[0].aws_region,
+                aws_account_id: $infra[0].aws_account_id, git_revision: $infra[0].tags.GitRevision,
+                infra_contract: $infra[0], platform_contract: $platform[0], approval_source: "catalog",
+                publish_auth: false, prepare_alb: false, publish_business: false, publish_webhook: false,
+                auth_release: null, alb_tls: null, alb_listener_arn: null, readiness: {},
+                auth_permissions_boundary_arn: null}' > /tmp/destroy-edge.tfvars.json
+            declared_variables=$(sed -n 's/^variable "\([^"]*\)".*/\1/p' phase4/stacks/edge/*.tf | sort)
+            supplied_variables=$(jq -r 'keys[]' /tmp/destroy-edge.tfvars.json | sort)
+            if [[ "$declared_variables" != "$supplied_variables" ]]; then
+              echo '::error::[3/4] Variaveis declaradas do edge diferem das fornecidas; revise o contrato antes do destroy.'
+              diff <(printf '%s\n' "$declared_variables") <(printf '%s\n' "$supplied_variables") || true
+              exit 1
+            fi
+            terraform -chdir=phase4/stacks/edge plan -destroy -input=false -no-color \
+              -var-file=/tmp/destroy-edge.tfvars.json | tee /tmp/destroy-edge-plan
+            { printf '\n### [3/4] Plano destroy edge\n```text\n'; cat /tmp/destroy-edge-plan; printf '\n```\n'; } >> "$GITHUB_STEP_SUMMARY"
+            if terraform -chdir=phase4/stacks/edge destroy -auto-approve -input=false -no-color \
+              -var-file=/tmp/destroy-edge.tfvars.json > /tmp/destroy-edge-attempt 2>&1; then
+              cat /tmp/destroy-edge-attempt
+            else
+              cat /tmp/destroy-edge-attempt
+              if ! grep -q 'DependencyViolation' /tmp/destroy-edge-attempt; then
+                echo '::error::[3/4] Destroy do edge falhou sem DependencyViolation; nao sera repetido automaticamente.'
+                exit 1
+              fi
+              echo 'ENIs da Lambda podem reter SGs: aguardando cinco minutos antes da unica nova tentativa.'
+              for minute in 1 2 3 4 5; do echo "Espera ENIs: minuto ${minute}/5"; sleep 60; done
+              if ! terraform -chdir=phase4/stacks/edge destroy -auto-approve -input=false -no-color \
+                -var-file=/tmp/destroy-edge.tfvars.json; then
+                echo '::error::[3/4] Destroy do edge falhou novamente apos aguardar cinco minutos; verifique ENIs da Lambda e dependencias dos SGs.'
+                exit 1
+              fi
+            fi
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[3/4] Montar entradas neutras e destruir platform'
+        id: platform_destroy
+        if: steps.states.outputs.platform_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[3/4] Falha nas entradas, plano ou destroy da platform; infra e segredos ainda nao foram removidos."' ERR
+          {
+            for addon in eks-pod-identity-agent aws-ebs-csi-driver vpc-cni; do
+              aws eks describe-addon-versions --kubernetes-version 1.35 --addon-name "$addon" \
+                --output json > "/tmp/destroy-${addon}.json"
+              version=$(jq -r '[.addons[].addonVersions[] | select(any(.compatibilities[];
+                .clusterVersion == "1.35" and .defaultVersion == true)) | .addonVersion] | unique |
+                if length == 1 then .[0] else empty end' "/tmp/destroy-${addon}.json")
+              if [[ -z "$version" || "$version" == null ]]; then
+                echo "::error::[3/4] Addon ${addon} sem versao default unica para Kubernetes 1.35."
+                exit 1
+              fi
+              printf '%s\n' "$version" > "/tmp/destroy-${addon}.version"
+            done
+            jq -n --arg pod_identity "$(cat /tmp/destroy-eks-pod-identity-agent.version)" \
+              --arg ebs_csi "$(cat /tmp/destroy-aws-ebs-csi-driver.version)" \
+              --arg vpc_cni "$(cat /tmp/destroy-vpc-cni.version)" \
+              '{pod_identity: $pod_identity, ebs_csi: $ebs_csi, vpc_cni: $vpc_cni}' > /tmp/destroy-addons.json
+            jq -n --arg account "$ACCOUNT_ID" --arg region "$AWS_REGION" \
+              --slurpfile infra /tmp/infra_contract.json --slurpfile images /tmp/destroy-images/images.json \
+              --slurpfile addons /tmp/destroy-addons.json '
+              {environment_id: "demo-a", aws_region: $region, aws_account_id: $account,
+                git_revision: "0000000000000000000000000000000000000000", infra_contract: $infra[0],
+                images: $images[0], addon_versions: $addons[0], new_relic_chart_version: "6.0.0",
+                mercado_pago: {enabled: false, success_url: "https://example.com/success",
+                  failure_url: "https://example.com/failure", pending_url: "https://example.com/pending"},
+                jwt: null, application_replicas: 0, auth_migration_enabled: false,
+                alb_controller_identity_enabled: false, alb_identity_inputs: null}' > /tmp/destroy-platform.tfvars.json
+            terraform -chdir=phase4/stacks/platform plan -destroy -input=false -no-color \
+              -var-file=/tmp/destroy-platform.tfvars.json | tee /tmp/destroy-platform-plan
+            { printf '\n### [3/4] Plano destroy platform\n```text\n'; cat /tmp/destroy-platform-plan; printf '\n```\n'; } >> "$GITHUB_STEP_SUMMARY"
+            terraform -chdir=phase4/stacks/platform destroy -auto-approve -input=false -no-color \
+              -var-file=/tmp/destroy-platform.tfvars.json
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[3/4] Python para destroy-secrets'
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: '[3/4] Remover somente segredos canonicos efemeros'
+        id: secrets_destroy
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[3/4] Falha em deliver.py destroy-secrets; confira ownership/tags e permissoes, sem remover segredos de entrada."' ERR
+          {
+            pip install -r scripts/platform-secrets/requirements.txt
+            python scripts/platform-secrets/deliver.py destroy-secrets --region "$AWS_REGION" --account "$ACCOUNT_ID"
+            echo '### [3/4] Edge/platform removidos (ou states vazios); destroy-secrets executado. Auth-signing, MERCADO_PAGO_CREDENTIAL e E2E_SMOKE_USER preservados.' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[4/4] Planejar e destruir infra'
+        id: infra_destroy
+        if: steps.states.outputs.infra_present == 'true'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[4/4] Falha no plano ou destroy da infra; confira dependencias residuais antes de repetir."' ERR
+          {
+            jq -n --arg account "$ACCOUNT_ID" --arg region "$AWS_REGION" --arg role "$AWS_ROLE_ARN" '
+              {environment_id: "demo-a", aws_region: $region, aws_account_id: $account,
+                git_revision: "0000000000000000000000000000000000000000",
+                availability_zones: ["us-east-1a", "us-east-1b"], eks_admin_role_arn: $role,
+                eks_public_access_cidrs: ["0.0.0.0/0"], node_count: 2}' > /tmp/destroy-infra.tfvars.json
+            terraform -chdir=phase4/stacks/infra plan -destroy -input=false -no-color \
+              -var-file=/tmp/destroy-infra.tfvars.json | tee /tmp/destroy-infra-plan
+            { printf '\n### [4/4] Plano destroy infra\n```text\n'; cat /tmp/destroy-infra-plan; printf '\n```\n'; } >> "$GITHUB_STEP_SUMMARY"
+            terraform -chdir=phase4/stacks/infra destroy -auto-approve -input=false -no-color \
+              -var-file=/tmp/destroy-infra.tfvars.json
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[4/4] Auditar residuos independente dos states e confirmar buckets'
+        id: audit
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::[4/4] Auditoria residual falhou; destroy so termina com ausencia comprovada dos recursos e preservacao dos dois buckets."' ERR
+          {
+            residual_count=0
+            printf '\n### [4/4] Auditoria AWS independente do state\n\n| Recurso | Esperado | Encontrado |\n|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+            record_absence() {
+              local resource="$1" findings="$2" found
+              jq -e 'type == "array" and all(.[]; type == "string")' <<< "$findings" > /dev/null
+              found=$(jq -r 'if length == 0 then "nenhum" else join(", ") end' <<< "$findings")
+              printf '| %s | ausente | %s |\n' "$resource" "$found" >> "$GITHUB_STEP_SUMMARY"
+              while IFS= read -r residual; do
+                echo "::error::[4/4] Residuo ${resource}: ${residual}"
+                residual_count=$((residual_count + 1))
+              done < <(jq -r '.[]' <<< "$findings")
+            }
+            aws eks list-clusters --output json > /tmp/destroy-audit-eks.json
+            record_absence EKS "$(jq -c --arg name "$NAME_PREFIX" '[.clusters[] | select(. == $name)]' /tmp/destroy-audit-eks.json)"
+            aws rds describe-db-instances --output json > /tmp/destroy-audit-rds.json
+            record_absence RDS "$(jq -c --arg name "${NAME_PREFIX}-postgres" '[.DBInstances[] | select(.DBInstanceIdentifier == $name) | .DBInstanceIdentifier]' /tmp/destroy-audit-rds.json)"
+            aws ec2 describe-vpcs --output json > /tmp/destroy-audit-vpcs.json
+            jq --slurpfile saved /tmp/destroy-vpc-ids.json --arg prefix "$NAME_PREFIX" '
+              ([.Vpcs[] | select(any(.Tags[]?; (.Key == "EnvironmentId" and .Value == "demo-a") or
+                (.Key == "Name" and .Value == ($prefix + "-vpc")))) | .VpcId] + $saved[0]) | unique
+            ' /tmp/destroy-audit-vpcs.json > /tmp/destroy-audit-vpc-ids.json
+            aws elbv2 describe-load-balancers --output json > /tmp/destroy-audit-albs.json
+            record_absence ALB "$(jq -c --arg prefix "${NAME_PREFIX}-" --slurpfile vpcs /tmp/destroy-audit-vpc-ids.json '
+              [.LoadBalancers[] | select((.LoadBalancerName | startswith($prefix)) or
+                (.VpcId as $vpc | $vpcs[0] | index($vpc) != null)) | .LoadBalancerArn]' /tmp/destroy-audit-albs.json)"
+            aws elbv2 describe-target-groups --output json > /tmp/destroy-audit-target-groups.json
+            printf '[]\n' > /tmp/destroy-audit-target-group-residuals.json
+            while IFS= read -r target_group; do
+              aws elbv2 describe-tags --resource-arns "$target_group" --output json > /tmp/destroy-audit-target-tags.json
+              if jq -e --arg arn "$target_group" --arg prefix "${NAME_PREFIX}-" \
+                --slurpfile vpcs /tmp/destroy-audit-vpc-ids.json --slurpfile saved /tmp/destroy-target-groups.json \
+                --slurpfile tags /tmp/destroy-audit-target-tags.json '
+                any(.TargetGroups[]; .TargetGroupArn == $arn and
+                  ((.TargetGroupName | startswith($prefix)) or (.VpcId as $vpc | $vpcs[0] | index($vpc) != null))) or
+                ($saved[0] | index($arn) != null) or
+                any($tags[0].TagDescriptions[].Tags[]?; .Key == "EnvironmentId" and .Value == "demo-a")
+              ' /tmp/destroy-audit-target-groups.json > /dev/null; then
+                jq --arg arn "$target_group" '. + [$arn]' /tmp/destroy-audit-target-group-residuals.json > /tmp/destroy-audit-target-group-next.json
+                mv /tmp/destroy-audit-target-group-next.json /tmp/destroy-audit-target-group-residuals.json
+              fi
+            done < <(jq -r '.TargetGroups[].TargetGroupArn' /tmp/destroy-audit-target-groups.json)
+            record_absence 'Target groups' "$(cat /tmp/destroy-audit-target-group-residuals.json)"
+            aws ec2 describe-volumes --output json > /tmp/destroy-audit-ebs.json
+            record_absence EBS "$(jq -c --slurpfile saved /tmp/destroy-volumes.json '
+              [.Volumes[] | select((.VolumeId as $volume | $saved[0] | index($volume) != null) or
+                any(.Tags[]?; .Key == "EnvironmentId" and .Value == "demo-a")) | .VolumeId]
+            ' /tmp/destroy-audit-ebs.json)"
+            aws ec2 describe-network-interfaces --output json > /tmp/destroy-audit-enis.json
+            record_absence ENIs "$(jq -c --slurpfile vpcs /tmp/destroy-audit-vpc-ids.json '
+              [.NetworkInterfaces[] | select((.VpcId as $vpc | $vpcs[0] | index($vpc) != null) or
+                any(.TagSet[]?; .Key == "EnvironmentId" and .Value == "demo-a")) | .NetworkInterfaceId]
+            ' /tmp/destroy-audit-enis.json)"
+            aws ec2 describe-security-groups --output json > /tmp/destroy-audit-sgs.json
+            record_absence 'Security groups' "$(jq -c --slurpfile vpcs /tmp/destroy-audit-vpc-ids.json '
+              [.SecurityGroups[] | select((.VpcId as $vpc | $vpcs[0] | index($vpc) != null) or
+                any(.Tags[]?; .Key == "EnvironmentId" and .Value == "demo-a")) | .GroupId]
+            ' /tmp/destroy-audit-sgs.json)"
+            record_absence VPC "$(jq -c --slurpfile vpcs /tmp/destroy-audit-vpc-ids.json '
+              [.Vpcs[] | select(.VpcId as $vpc | $vpcs[0] | index($vpc) != null) | .VpcId]' /tmp/destroy-audit-vpcs.json)"
+            aws ecr describe-repositories --output json > /tmp/destroy-audit-ecr.json
+            record_absence ECR "$(jq -c --arg prefix "${NAME_PREFIX}-" '[.repositories[] |
+              select(.repositoryName | startswith($prefix)) | .repositoryName]' /tmp/destroy-audit-ecr.json)"
+            aws lambda list-functions --output json > /tmp/destroy-audit-lambda.json
+            record_absence Lambda "$(jq -c --arg name "${NAME_PREFIX}-auth" '[.Functions[] |
+              select(.FunctionName == $name) | .FunctionArn]' /tmp/destroy-audit-lambda.json)"
+            aws apigatewayv2 get-apis --output json > /tmp/destroy-audit-apis.json
+            record_absence 'API Gateway' "$(jq -c --arg name "${NAME_PREFIX}-edge" '[.Items[] |
+              select(.Name == $name or .Tags.EnvironmentId == "demo-a") | .ApiId]' /tmp/destroy-audit-apis.json)"
+            deadline=$((SECONDS + 120))
+            while :; do
+              aws secretsmanager list-secrets --include-planned-deletion --output json > /tmp/destroy-audit-secrets.json
+              secrets=$(jq -c '[.SecretList[] | select((.Name | startswith("/oficina/phase4/demo-a/")) and
+                .Name != "/oficina/phase4/demo-a/auth-signing") |
+                .ARN + (if .DeletedDate then " (exclusao pendente)" else "" end)]' /tmp/destroy-audit-secrets.json)
+              if [[ "$secrets" == '[]' ]] || (( SECONDS >= deadline )); then break; fi
+              sleep 10
+            done
+            record_absence Secrets "$secrets"
+            for bucket in "${NAME_PREFIX}-artifacts" "$STATE_BUCKET"; do
+              if aws s3api head-bucket --bucket "$bucket" 2> /tmp/destroy-bucket-error; then
+                printf '| Bucket `%s` | preservado | existe |\n' "$bucket" >> "$GITHUB_STEP_SUMMARY"
+              else
+                printf '| Bucket `%s` | preservado | ausente ou inacessivel |\n' "$bucket" >> "$GITHUB_STEP_SUMMARY"
+                echo "::error::[4/4] Nao foi possivel confirmar bucket preservado: ${bucket}"
+                cat /tmp/destroy-bucket-error
+                residual_count=$((residual_count + 1))
+              fi
+            done
+            if (( residual_count > 0 )); then
+              echo "::error::[4/4] Auditoria reprovada: ${residual_count} residuos ou falhas de preservacao."
+              exit 1
+            fi
+            echo 'Destroy demo-a concluido: auditoria sem residuos; buckets preservados.' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$DESTROY_LOG"
+
+      - name: '[4/4] Diagnosticos de falha'
+        id: diagnostics
+        if: failure()
+        env:
           STEPS_JSON: ${{ toJSON(steps) }}
         run: |
-          if test -f scripts/environment-actions/complete_report.py; then
-            python scripts/environment-actions/complete_report.py
-          else
-            mkdir -p all-diagnostics
-            printf '%s\n' '{"result":"FAIL","checks":[{"phase":"checkout-or-setup","status":"FAIL","reason":"EXECUTOR_UNAVAILABLE"}]}' > all-diagnostics/report.json
-          fi
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: destroy-final-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: all-diagnostics/
-          if-no-files-found: error
-          retention-days: 7
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao coletar diagnosticos do destroy; consulte tambem o passo original."' ERR
+          {
+            failed_steps=$(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key as $step |
+              (if (["checkout", "confirmation", "credentials", "terraform", "images", "states", "inventory"] | index($step)) != null
+                then "[1/4]"
+                elif (["ingresses", "alb_cleanup", "volumes_cleanup", "helm", "namespaces_cleanup"] | index($step)) != null
+                then "[2/4]"
+                elif (["edge_destroy", "platform_destroy", "python", "secrets_destroy"] | index($step)) != null
+                then "[3/4]" else "[4/4]" end) + " " + $step' <<< "$STEPS_JSON")
+            echo "::error::Destroy interrompido na fase/passo: ${failed_steps//$'\n'/, }."
+            printf '\n### Falha no destroy\n\nPassos: `%s`.\n\n```text\n' "$failed_steps" >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f "${KUBECONFIG:-$HOME/.kube/config}" ]]; then
+              kubectl get ingress,pvc,pv,tgb -A || true
+              if [[ -n "${NAME_PREFIX:-}" ]]; then
+                kubectl get events -n "$NAME_PREFIX" --sort-by=.lastTimestamp | tail -n 30 || true
+              fi
+            fi
+            if [[ -n "${NAME_PREFIX:-}" ]]; then
+              aws elbv2 describe-load-balancers --output json | \
+                jq --arg prefix "${NAME_PREFIX}-" '[.LoadBalancers[] | select(.LoadBalancerName | startswith($prefix))]' || true
+            fi
+            printf '\nUltimas 200 linhas do log:\n'
+            if [[ -f "$DESTROY_LOG" ]]; then
+              tail -n 200 "$DESTROY_LOG" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee /tmp/destroy-diagnostics.log
