@@ -55,7 +55,7 @@ def canonical_tags(plan, name):
     return {'EnvironmentId': plan.scope.environment, 'ManagedBy': 'platform-secrets', 'Owner': spec.owner if spec else 'pki',
             'Purpose': spec.purpose if spec else 'technical-ca', 'Lifecycle': 'ephemeral',
             'ProjectionLifecycle': spec.lifecycle if spec else 'certificate', 'Origin': spec.source if spec else 'generated-pki',
-            'Consumers': ','.join(spec.consumers) if spec else 'automation-only'}
+            'Consumers': '+'.join(spec.consumers) if spec else 'automation-only'}
 
 
 class SecretsManagerReader:
