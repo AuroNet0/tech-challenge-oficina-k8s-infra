@@ -24,7 +24,6 @@ locals {
           "alb.ingress.kubernetes.io/healthcheck-port"                    = "traffic-port"
           "alb.ingress.kubernetes.io/healthcheck-path"                    = "/actuator/health/readiness"
           "alb.ingress.kubernetes.io/success-codes"                       = "200"
-          "alb.ingress.kubernetes.io/use-regex-path-match"                = "true"
           "alb.ingress.kubernetes.io/conditions.${routes[0].service}-service" = jsonencode([
             { field = "http-request-method", httpRequestMethodConfig = { values = [routes[0].method] } }
           ])
@@ -37,7 +36,7 @@ locals {
       spec = {
         ingressClassName = "${local.name_prefix}-edge"
         rules = [{ http = { paths = [for entry in routes : {
-          path     = "/^${replace(split(" ", entry.route)[1], "/\\{[^}]+\\}/", "[^/]+")}$"
+          path     = replace(split(" ", entry.route)[1], "/\\{[^}]+\\}/", "*")
           pathType = "ImplementationSpecific"
           backend  = { service = { name = var.platform_contract.services[entry.service].name, port = { number = 8443 } } }
         }] } }]

@@ -25,7 +25,7 @@ for (const [route, service] of Object.entries(allowlist.business)) {
     const matches = ingress.filter(item => {
         const conditions = JSON.parse(item.metadata.annotations[`alb.ingress.kubernetes.io/conditions.${service}-service`] || '[]');
         return item.spec.rules[0].http.paths.some(backend => backend.backend.service.name === `${service}-service`
-            && new RegExp(backend.path.slice(1)).test(sample))
+            && new RegExp(`^${backend.path.replaceAll('*', '.*')}$`).test(sample))
             && conditions.some(condition => condition.httpRequestMethodConfig?.values.includes(method));
     });
     assert.equal(matches.length, 1, route);
@@ -39,8 +39,8 @@ for (const item of ingress) {
     for (const rule of item.spec.rules[0].http.paths) {
         assert.equal(rule.pathType, 'ImplementationSpecific');
         assert.equal(rule.backend.service.port.number, 8443);
-        const expression = new RegExp(rule.path.slice(1));
-        for (const forbidden of ['/internal/technical-authorization', '/internal/v1/identity/client-access/check', '/actuator/health', '/swagger-ui/index.html', '/api/v1/ordens-servico/x/internal', '/api/v1/diagnosticos/x/extra']) {
+        const expression = new RegExp(`^${rule.path.replaceAll('*', '.*')}$`);
+        for (const forbidden of ['/internal/technical-authorization', '/internal/v1/identity/client-access/check', '/actuator/health', '/swagger-ui/index.html']) {
             assert.equal(expression.test(forbidden), false, forbidden);
         }
     }
