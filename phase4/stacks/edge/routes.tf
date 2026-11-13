@@ -107,8 +107,11 @@ resource "aws_apigatewayv2_integration" "business" {
   payload_format_version = "1.0"
   timeout_milliseconds   = 15000
   request_parameters     = { "overwrite:path" = "$request.path" }
-  tls_config {
-    server_name_to_verify = var.alb_tls.server_name
+  dynamic "tls_config" {
+    for_each = var.alb_tls == null ? [] : [var.alb_tls]
+    content {
+      server_name_to_verify = tls_config.value.server_name
+    }
   }
   depends_on = [terraform_data.listener_guard, terraform_data.certificate_guard]
 }

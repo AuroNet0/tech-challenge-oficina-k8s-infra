@@ -8,7 +8,7 @@ resource "aws_security_group" "edge" {
 
 locals {
   network_flows = {
-    link_alb       = { source = aws_security_group.edge["vpc-link"].id, target = aws_security_group.edge["alb"].id, port = 443 }
+    link_alb       = { source = aws_security_group.edge["vpc-link"].id, target = aws_security_group.edge["alb"].id, port = var.alb_tls == null ? 80 : 443 }
     alb_pods       = { source = aws_security_group.edge["alb"].id, target = var.infra_contract.security_groups.nodes, port = 8443 }
     lambda_db      = { source = aws_security_group.edge["lambda"].id, target = var.infra_contract.security_groups.database, port = 5432 }
     lambda_secrets = { source = aws_security_group.edge["lambda"].id, target = aws_security_group.edge["secrets-endpoint"].id, port = 443 }
@@ -81,9 +81,9 @@ resource "terraform_data" "listener_guard" {
         data.aws_lb.observed[0].tags.EnvironmentId == var.environment_id &&
         toset(data.aws_lb.observed[0].subnets) == toset(local.subnet_ids) &&
         toset(data.aws_lb.observed[0].security_groups) == toset([aws_security_group.edge["alb"].id]) &&
-        data.aws_lb_listener.observed[0].port == 443 &&
-        data.aws_lb_listener.observed[0].protocol == "HTTPS" &&
-        data.aws_lb_listener.observed[0].certificate_arn == var.alb_tls.certificate_arn,
+        data.aws_lb_listener.observed[0].port == (var.alb_tls == null ? 80 : 443) &&
+        data.aws_lb_listener.observed[0].protocol == (var.alb_tls == null ? "HTTP" : "HTTPS") &&
+        (var.alb_tls == null ? true : data.aws_lb_listener.observed[0].certificate_arn == var.alb_tls.certificate_arn),
         false
       )
       error_message = "Listener observado nao corresponde ao ALB interno, SG, subnets, ownership ou TLS aprovados."

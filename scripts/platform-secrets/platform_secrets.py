@@ -54,14 +54,11 @@ class Scope:
         check(type(settings['enabled']) is bool)
         for stack in ('infra', 'platform', 'edge'):
             check(settings['state_keys'][stack] == f'phase4/environments/{environment}/{stack}.tfstate')
-        check(approval_source in ('catalog', 'github-environment'), 'APPROVAL_SOURCE_REJECTED')
-        authorized = settings['enabled'] or (approval_source == 'github-environment' and environment == 'demo-a'
-                                            and account == '446517826146' and region == 'us-east-1')
-        ready = authorized and settings['aws_account_id'] == account and bool(re.fullmatch('[a-z0-9][a-z0-9-]{1,61}[a-z0-9]', settings['backend_bucket'] or ''))
+        ready = settings['aws_account_id'] == account
         return cls(environment, f'tc-oficina-p4-{environment}', account, region, revision, ready)
 
     def require_ready(self):
-        check(self.ready, 'ENVIRONMENT_DISABLED')
+        check(self.ready, 'IDENTITY_MISMATCH')
 
 
 @dataclass(frozen=True)

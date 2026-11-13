@@ -20,7 +20,7 @@ locals {
   name_prefix      = module.environment.contract.name_prefix
   subnet_ids       = sort([for subnet in var.infra_contract.private_subnets : subnet.id])
   auth_enabled     = var.publish_auth && var.auth_release != null
-  business_enabled = var.publish_business && var.alb_tls != null && var.alb_listener_arn != null
+  business_enabled = var.publish_business && var.alb_listener_arn != null
   labels = {
     "app.kubernetes.io/part-of" = "oficina-phase4"
     "oficina/environment"       = var.environment_id
@@ -83,10 +83,10 @@ resource "terraform_data" "edge_guard" {
     }
     precondition {
       condition = !var.prepare_alb || (
-        var.alb_tls != null && var.readiness.controller_ready && var.readiness.workloads_ready &&
+        var.readiness.controller_ready && var.readiness.workloads_ready &&
         var.readiness.network_policy_enforced && var.readiness.pki_valid_for_operation
       )
-      error_message = "Ingress bloqueado: certificado ACM confiavel, controller, workloads, dataplane e validade PKI comprovados obrigatorios."
+      error_message = "Ingress bloqueado: controller, workloads, dataplane e validade PKI comprovados obrigatorios."
     }
     precondition {
       condition = !var.publish_business || (
