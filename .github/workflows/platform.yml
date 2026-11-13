@@ -11,6 +11,14 @@ on:
         description: External Mercado Pago TEST credentials secret ARN in the workflow account and region
         required: true
         type: string
+      stage:
+        description: Platform deployment stage
+        required: true
+        type: choice
+        options:
+          - data
+          - apps
+        default: data
       mode:
         description: Terraform operation for phase4/stacks/platform
         required: true
@@ -43,6 +51,7 @@ jobs:
       AWS_REGION: us-east-1
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       PLATFORM_MODE: ${{ inputs.mode }}
+      PLATFORM_STAGE: ${{ inputs.stage }}
       IMAGES_RUN_ID: ${{ inputs.images_run_id }}
       MERCADO_PAGO_SECRET_ARN: ${{ inputs.mercado_pago_secret_arn }}
       PLATFORM_LOG: /tmp/platform.log
@@ -115,6 +124,27 @@ jobs:
             echo '::endgroup::'
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
+      - name: Read edge JWT contract
+        if: inputs.stage == 'apps'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao ler jwt_contract do edge; confira backend, output e URLs HTTPS de issuer/JWKS."' ERR
+          {
+            terraform -chdir=phase4/stacks/edge init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config=key=phase4/environments/demo-a/edge.tfstate \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true
+            terraform -chdir=phase4/stacks/edge output -json jwt_contract | \
+              jq '{value: .}' > /tmp/platform-edge-jwt.json
+            jq -e '.value | select(
+              (keys == ["audience", "issuer", "jwks_uri"]) and
+              all(.[]; type == "string" and length > 0) and
+              (.issuer | startswith("https://")) and (.jwks_uri | startswith("https://"))
+            )' /tmp/platform-edge-jwt.json > /tmp/platform-jwt.json
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
       - name: Resolve default EKS addon versions
         run: |
           set -Eeuo pipefail
@@ -173,10 +203,20 @@ jobs:
                   failure_url: "https://example.com/failure", pending_url: "https://example.com/pending"},
                 jwt: null, application_replicas: 0, auth_migration_enabled: true}' \
               > phase4/stacks/platform/tfvars.json
+            if [[ "$PLATFORM_STAGE" == apps ]]; then
+              jq --slurpfile jwt /tmp/platform-jwt.json '
+                .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false
+              ' phase4/stacks/platform/tfvars.json > /tmp/platform-apps-tfvars.json
+              mv /tmp/platform-apps-tfvars.json phase4/stacks/platform/tfvars.json
+            fi
             {
               printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
               printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
-              printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
+              if [[ "$PLATFORM_STAGE" == apps ]]; then
+                printf 'Stage apps; JWT do edge; uma replica por Deployment; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
+              else
+                printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
+              fi
               cat /tmp/platform-addons.json
               printf '```\n'
             } | tee -a "$GITHUB_STEP_SUMMARY"
@@ -240,7 +280,7 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Apply foundation and network only
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao exportar manifests ou aplicar foundation/network; confira kubeconfig, acesso EKS e namespaces."' ERR
@@ -266,12 +306,12 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - uses: actions/setup-python@v5
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         with:
           python-version: '3.13'
 
       - name: Create rds-ca ConfigMap
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha na validacao do bundle RDS ou criacao dos ConfigMaps de CA; confira TLS, certificados e referencias dos manifests."' ERR
@@ -329,7 +369,7 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Deliver secrets
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao instalar dependencias ou entregar secrets; confira permissoes, kubeconfig e credenciais TEST do Mercado Pago."' ERR
@@ -349,7 +389,7 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Apply data and wait for StatefulSets
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao aplicar data ou aguardar StatefulSets prontos em 300s."' ERR
@@ -367,7 +407,7 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Apply bootstrap and clean temporary secrets
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha na fase bootstrap ou na remocao dos secrets temporarios de bootstrap."' ERR
@@ -394,7 +434,7 @@ jobs:
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Apply migration and clean temporary secrets
-        if: inputs.mode == 'apply'
+        if: inputs.mode == 'apply' && inputs.stage == 'data'
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha na fase migration ou na remocao dos secrets temporarios de migration."' ERR
@@ -420,6 +460,80 @@ jobs:
             printf '\n### Applied\n\nData, bootstrap and migration completed; temporary projections cleaned.\n' |
               tee -a "$GITHUB_STEP_SUMMARY"
             echo '::endgroup::'
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Check apps prerequisites
+        if: inputs.mode == 'apply' && inputs.stage == 'apps'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao conferir manifests, ConfigMap rds-ca ou Secrets existentes para apps."' ERR
+          {
+            terraform -chdir=phase4/stacks/platform output -json manifests > /tmp/platform-manifests.json
+            cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
+            aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION"
+            jq -er '.auth' /tmp/platform-manifests.json > /tmp/platform-auth.json
+            jq -er '.applications' /tmp/platform-manifests.json > /tmp/platform-applications.json
+            jq -s '{apiVersion: "v1", kind: "List", items: [.[].items[]]}' \
+              /tmp/platform-auth.json /tmp/platform-applications.json > /tmp/platform-apps.json
+            jq -e '[.items[] | select(.kind == "Deployment")] |
+              length == 4 and all(.[];
+                (.metadata.namespace | type == "string" and length > 0) and
+                (.metadata.name | type == "string" and length > 0) and
+                (.spec.selector.matchLabels | type == "object" and length > 0))' \
+              /tmp/platform-apps.json > /dev/null
+            jq -r '.items[] | select(.kind == "Deployment") |
+              [.metadata.namespace, .metadata.name,
+                (.spec.selector.matchLabels | to_entries | sort_by(.key) |
+                  map(.key + "=" + .value) | join(","))] | @tsv' \
+              /tmp/platform-apps.json > /tmp/platform-deployments.tsv
+            jq -r '[.items[] | select(.kind == "Deployment") | .metadata.namespace] |
+              unique[]' /tmp/platform-apps.json > /tmp/platform-apps-namespaces.txt
+            jq -r '[.items[] | select(.kind == "Deployment") | . as $deployment |
+              .spec.template.spec | .. | objects |
+              (.secretKeyRef.name? // .secret.secretName? // .secretRef.name? // empty) |
+              [$deployment.metadata.namespace, .]] | unique[] | @tsv' \
+              /tmp/platform-apps.json > /tmp/platform-apps-secrets.tsv
+            missing=()
+            while IFS= read -r namespace; do
+              if ! kubectl get configmap rds-ca -n "$namespace" -o name --request-timeout=30s; then
+                missing+=("${namespace}/ConfigMap/rds-ca")
+              fi
+            done < /tmp/platform-apps-namespaces.txt
+            while IFS=$'\t' read -r namespace secret; do
+              if ! kubectl get secret "$secret" -n "$namespace" -o name --request-timeout=30s; then
+                missing+=("${namespace}/Secret/${secret}")
+              fi
+            done < /tmp/platform-apps-secrets.tsv
+            if (( ${#missing[@]} > 0 )); then
+              printf '::error::Dependencias ausentes ou inacessiveis para apps: %s\n' "${missing[*]}"
+              exit 1
+            fi
+          } 2>&1 | tee -a "$PLATFORM_LOG"
+
+      - name: Apply apps and wait for Deployments
+        if: inputs.mode == 'apply' && inputs.stage == 'apps'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao aplicar auth/applications ou aguardar os Deployments; confira os diagnosticos de rollout."' ERR
+          {
+            kubectl apply -f /tmp/platform-auth.json
+            kubectl apply -f /tmp/platform-applications.json
+            failed=false
+            while IFS=$'\t' read -r namespace deployment selector; do
+              if ! kubectl rollout status "deployment/${deployment}" -n "$namespace" --timeout=600s; then
+                echo "::error::Rollout do Deployment ${namespace}/${deployment} falhou ou excedeu 600s."
+                printf '%s\t%s\t%s\n' "$namespace" "$deployment" "$selector" >> /tmp/platform-failed-rollouts.tsv
+                failed=true
+              fi
+            done < /tmp/platform-deployments.tsv
+            printf '\n### Deployments apps\n\n| Namespace | Deployment | Replicas prontas/desejadas |\n| --- | --- | --- |\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            while IFS=$'\t' read -r namespace deployment selector; do
+              kubectl get deployment "$deployment" -n "$namespace" -o json --request-timeout=30s | \
+                jq -r '"| \(.metadata.namespace) | \(.metadata.name) | \(.status.readyReplicas // 0)/\(.spec.replicas) |"' \
+                >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/platform-deployments.tsv
+            [[ "$failed" == false ]]
           } 2>&1 | tee -a "$PLATFORM_LOG"
 
       - name: Failure diagnostics
@@ -451,6 +565,24 @@ jobs:
               fi
               kubectl get events -A --sort-by=.lastTimestamp --request-timeout=30s || \
                 echo '::error::Nao foi possivel listar eventos.'
+              if [[ "$PLATFORM_STAGE" == apps ]] && test -s /tmp/platform-failed-rollouts.tsv; then
+                while IFS=$'\t' read -r namespace deployment selector; do
+                  printf '\nDeployment com falha: %s/%s; selector: %s\n' "$namespace" "$deployment" "$selector"
+                  kubectl describe deployment "$deployment" -n "$namespace" --request-timeout=30s || \
+                    echo "::error::Nao foi possivel descrever Deployment ${namespace}/${deployment}."
+                  if kubectl get pods -n "$namespace" -l "$selector" -o json --request-timeout=30s \
+                    > /tmp/platform-rollout-pods.json; then
+                    while IFS= read -r pod; do
+                      kubectl describe pod "$pod" -n "$namespace" --request-timeout=30s || \
+                        echo "::error::Nao foi possivel descrever pod ${namespace}/${pod}."
+                      kubectl logs "$pod" -n "$namespace" --tail=100 --all-containers=true --request-timeout=30s || \
+                        echo "::error::Nao foi possivel obter logs do pod ${namespace}/${pod}."
+                    done < <(jq -r '.items[].metadata.name' /tmp/platform-rollout-pods.json)
+                  else
+                    echo "::error::Nao foi possivel listar pods do Deployment ${namespace}/${deployment}."
+                  fi
+                done < /tmp/platform-failed-rollouts.tsv
+              fi
               printf '```\n\n### Last 200 log lines\n\n```text\n'
               if test -f "$PLATFORM_LOG"; then tail -n 200 "$PLATFORM_LOG"; fi
               printf '```\n'
