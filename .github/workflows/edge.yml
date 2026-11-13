@@ -1,0 +1,289 @@
+name: Edge (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_release_run_id:
+        description: Successful auth-artifact.yml run containing auth_release.json
+        required: true
+        type: string
+      mode:
+        description: Terraform operation for phase4/stacks/edge (publish_auth)
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+
+jobs:
+  edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_WORKSPACE: default
+      AWS_REGION: us-east-1
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      EDGE_MODE: ${{ inputs.mode }}
+      AUTH_RELEASE_RUN_ID: ${{ inputs.auth_release_run_id }}
+      EDGE_LOG: /tmp/edge.log
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        id: credentials
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: edge-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+          unset-current-credentials: true
+
+      - uses: hashicorp/setup-terraform@v3
+        id: terraform
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Check inputs and Auth release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao validar inputs ou o run de auth-artifact.yml; confira auth_release_run_id, mode e AWS_ROLE_ARN."' ERR
+          {
+            [[ "$EDGE_MODE" == plan || "$EDGE_MODE" == apply ]]
+            [[ "$AUTH_RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            test -n "$AWS_ROLE_ARN"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${AUTH_RELEASE_RUN_ID}" > /tmp/edge-auth-run.json
+            jq -e '.path == ".github/workflows/auth-artifact.yml" and
+              .status == "completed" and .conclusion == "success"' /tmp/edge-auth-run.json
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Download auth_release.json
+        id: auth_release
+        uses: actions/download-artifact@v4
+        with:
+          name: auth_release.json
+          run-id: ${{ inputs.auth_release_run_id }}
+          github-token: ${{ github.token }}
+          path: /tmp/edge-auth-release
+
+      - name: Read infra and Platform contracts
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao inicializar infra/platform ou ler platform_contract e edge_contract; confira os states de demo-a e permissoes AWS."' ERR
+          {
+            for stack in infra platform; do
+              terraform -chdir="phase4/stacks/${stack}" init -input=false -no-color \
+                -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+                -backend-config="key=phase4/environments/demo-a/${stack}.tfstate" \
+                -backend-config=region=us-east-1 \
+                -backend-config=encrypt=true \
+                -backend-config=use_lockfile=true
+            done
+            terraform -chdir=phase4/stacks/infra output -json platform_contract > /tmp/infra_contract.json
+            terraform -chdir=phase4/stacks/platform output -json > /tmp/edge-platform-outputs.json
+            jq -e '.edge_contract | select(.sensitive == false) | .value | select(type == "object")' \
+              /tmp/edge-platform-outputs.json > /tmp/edge-platform-contract.json
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Generate Terraform inputs
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao gerar tfvars.json; confira identidade AWS, contratos infra/platform, GitRevision e auth_release.json. Nenhum valor ausente sera presumido."' ERR
+          {
+            account_id=$(aws sts get-caller-identity --query Account --output text)
+            [[ "$account_id" =~ ^[0-9]{12}$ ]]
+            [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::${account_id}:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+            jq -e --arg account "$account_id" '
+              .environment_id == "demo-a" and .aws_region == "us-east-1" and
+              .aws_account_id == $account and (.tags.GitRevision | test("^[0-9a-f]{40}$"))
+            ' /tmp/infra_contract.json
+            jq -e --slurpfile infra /tmp/infra_contract.json '
+              .environment_id == $infra[0].environment_id and
+              .aws_account_id == $infra[0].aws_account_id and .aws_region == $infra[0].aws_region and
+              .namespace == $infra[0].name_prefix and .vpc_id == $infra[0].vpc_id and
+              ((.private_subnet_ids | sort) == ([$infra[0].private_subnets[].id] | sort))
+            ' /tmp/edge-platform-contract.json
+            jq -e --slurpfile infra /tmp/infra_contract.json '
+              (keys == ["bootstrap_layer_arn", "bootstrap_revision", "bucket", "key", "revision", "sha256_base64", "version_id"]) and
+              all(.[]; type == "string") and
+              .bucket == ($infra[0].name_prefix + "-artifacts") and
+              (.revision | test("^[0-9a-f]{40}$")) and .key == ("auth/" + .revision + "/auth.jar") and
+              (.version_id | length > 0) and .version_id != "null" and
+              (.sha256_base64 | test("^[A-Za-z0-9+/]{43}=$")) and
+              (.bootstrap_revision | test("^[0-9a-f]{40}$")) and
+              (.bootstrap_layer_arn | test("^arn:aws:lambda:" + $infra[0].aws_region + ":" +
+                $infra[0].aws_account_id + ":layer:" + $infra[0].name_prefix + "-auth-bootstrap:[1-9][0-9]*$"))
+            ' /tmp/edge-auth-release/auth_release.json > /dev/null
+            jq -n --slurpfile infra /tmp/infra_contract.json \
+              --slurpfile platform /tmp/edge-platform-contract.json \
+              --slurpfile release /tmp/edge-auth-release/auth_release.json '
+              {environment_id: $infra[0].environment_id, aws_region: $infra[0].aws_region,
+                aws_account_id: $infra[0].aws_account_id, git_revision: $infra[0].tags.GitRevision,
+                approval_source: "catalog", auth_permissions_boundary_arn: null,
+                infra_contract: $infra[0], platform_contract: $platform[0],
+                publish_auth: true, prepare_alb: false, publish_business: false, publish_webhook: false,
+                readiness: {}, auth_release: $release[0], alb_tls: null, alb_listener_arn: null}
+            ' > phase4/stacks/edge/tfvars.json
+            declared_variables=$(sed -n 's/^variable "\([^"]*\)".*/\1/p' phase4/stacks/edge/*.tf | sort)
+            supplied_variables=$(jq -r 'keys[]' phase4/stacks/edge/tfvars.json | sort)
+            [[ "$declared_variables" == "$supplied_variables" ]]
+            printf '### Edge publish_auth\n\nMode: `%s`; Auth release run: `%s`.\n\nBusiness, ALB e webhook desabilitados; TLS e listener null; readiness sem atestacoes.\n' \
+              "$EDGE_MODE" "$AUTH_RELEASE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Terraform init
+        working-directory: phase4/stacks/edge
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform init de edge; confira backend e permissoes AWS."' ERR
+          {
+            terraform init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config=key=phase4/environments/demo-a/edge.tfstate \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Terraform validate
+        working-directory: phase4/stacks/edge
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform validate de edge; confira o diagnostico no log."' ERR
+          { terraform validate -no-color; } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Terraform plan
+        working-directory: phase4/stacks/edge
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform plan de edge; confira contratos, artefato Auth e permissoes AWS."' ERR
+          {
+            terraform plan -input=false -no-color -lock-timeout=5m -var-file=tfvars.json -out=tfplan
+            terraform show -no-color tfplan > /tmp/edge-plan.txt
+            {
+              printf '\n### Terraform plan\n\n```text\n'
+              cat /tmp/edge-plan.txt
+              printf '```\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Terraform apply
+        if: inputs.mode == 'apply'
+        working-directory: phase4/stacks/edge
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no terraform apply de edge; confira log e state antes de repetir."' ERR
+          { terraform apply -input=false -no-color -lock-timeout=5m tfplan; } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Export edge outputs
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao exportar outputs de edge ou resumir endpoint, issuer e JWKS sem valores sensiveis."' ERR
+          {
+            terraform -chdir=phase4/stacks/edge output -json > /tmp/edge-outputs.json
+            jq -er '
+              if .edge_contract.sensitive == false and .jwt_contract.sensitive == false then
+                "\n### Edge endpoints\n\nAPI Gateway: " + .edge_contract.value.api_endpoint +
+                "\n\nIssuer: " + .jwt_contract.value.issuer + "\n\nJWKS: " + .jwt_contract.value.jwks_uri
+              else error("Outputs ausentes ou sensiveis") end
+            ' /tmp/edge-outputs.json >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Upload edge-outputs.json
+        id: outputs
+        if: inputs.mode == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-outputs.json
+          path: /tmp/edge-outputs.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Smoke test JWKS
+        if: inputs.mode == 'apply'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no smoke test JWKS; endpoint deve responder com .keys contendo pelo menos uma chave em ate 120s."' ERR
+          {
+            jwks_uri=$(jq -er '.jwt_contract | select(.sensitive == false) | .value.jwks_uri |
+              select(type == "string" and startswith("https://"))' /tmp/edge-outputs.json)
+            deadline=$((SECONDS + 120))
+            ready=false
+            while (( SECONDS < deadline )); do
+              remaining=$((deadline - SECONDS))
+              if curl --fail --silent --show-error --proto '=https' --connect-timeout 10 \
+                --max-time "$remaining" "$jwks_uri" -o /tmp/edge-jwks.json &&
+                jq -e '.keys | type == "array" and length >= 1' /tmp/edge-jwks.json > /dev/null; then
+                ready=true
+                break
+              fi
+              remaining=$((deadline - SECONDS))
+              if (( remaining > 0 )); then
+                sleep "$((remaining < 5 ? remaining : 5))"
+              fi
+            done
+            [[ "$ready" == true ]]
+            printf '\n### Smoke test\n\nJWKS respondeu com pelo menos uma chave.\n' >> "$GITHUB_STEP_SUMMARY"
+          } 2>&1 | tee -a "$EDGE_LOG"
+
+      - name: Failure diagnostics
+        if: failure()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          CREDENTIALS_OUTCOME: ${{ steps.credentials.outcome }}
+          TERRAFORM_OUTCOME: ${{ steps.terraform.outcome }}
+          RELEASE_OUTCOME: ${{ steps.auth_release.outcome }}
+          OUTPUTS_OUTCOME: ${{ steps.outputs.outcome }}
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao registrar diagnosticos de edge."' ERR
+          for action in CHECKOUT CREDENTIALS TERRAFORM RELEASE OUTPUTS; do
+            outcome_variable="${action}_OUTCOME"
+            if [[ "${!outcome_variable}" == failure ]]; then
+              echo "::error::Falha na action ${action}; confira checkout, OIDC, instalacao do Terraform ou transferencia de artifacts conforme o passo indicado."
+            fi
+          done
+          {
+            printf '\n### Last 200 log lines\n\n```text\n'
+            if test -f "$EDGE_LOG"; then tail -n 200 "$EDGE_LOG"; fi
+            printf '```\n'
+            lambda_name=''
+            if test -s /tmp/edge-outputs.json; then
+              lambda_name=$(jq -r '
+                [.lambda_function_name?, .auth_lambda_function_name?,
+                  (.edge_contract? | select(.sensitive == false) | .value |
+                    {sensitive: false, value: (.lambda_function_name? // .auth_lambda_function_name?)})] |
+                map(select(.sensitive == false and (.value | type == "string" and length > 0))) |
+                .[0].value // empty
+              ' /tmp/edge-outputs.json) || lambda_name=''
+            fi
+            if [[ -n "$lambda_name" ]]; then
+              printf '\n### Lambda: ultimas 50 linhas\n\n```text\n'
+              aws logs tail "/aws/lambda/${lambda_name}" --since 1h --format short 2>&1 | tail -n 50 || \
+                echo '::error::Nao foi possivel consultar o log group da Lambda.'
+              printf '```\n'
+            else
+              printf '\nDiagnostico Lambda pulado: nome nao disponivel nos outputs do edge.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" 2>&1
