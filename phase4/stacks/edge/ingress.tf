@@ -1,5 +1,5 @@
 locals {
-  ingress_objects = jsondecode(!var.prepare_alb || var.alb_tls == null ? "[]" : jsonencode(concat([
+  ingress_objects = jsondecode(!var.prepare_alb ? "[]" : jsonencode(concat([
     {
       apiVersion = "networking.k8s.io/v1", kind = "IngressClass"
       metadata   = { name = "${local.name_prefix}-edge", labels = local.labels }
@@ -9,7 +9,7 @@ locals {
       apiVersion = "networking.k8s.io/v1", kind = "Ingress"
       metadata = {
         name = "edge-${group}", namespace = var.platform_contract.namespace, labels = local.labels
-        annotations = {
+        annotations = merge({
           "alb.ingress.kubernetes.io/group.name"                          = "${local.name_prefix}-edge"
           "alb.ingress.kubernetes.io/load-balancer-name"                  = "${local.name_prefix}-edge"
           "alb.ingress.kubernetes.io/scheme"                              = "internal"
@@ -17,9 +17,7 @@ locals {
           "alb.ingress.kubernetes.io/subnets"                             = join(",", local.subnet_ids)
           "alb.ingress.kubernetes.io/security-groups"                     = aws_security_group.edge["alb"].id
           "alb.ingress.kubernetes.io/manage-backend-security-group-rules" = "false"
-          "alb.ingress.kubernetes.io/listen-ports"                        = jsonencode([{ HTTPS = 443 }])
-          "alb.ingress.kubernetes.io/certificate-arn"                     = var.alb_tls.certificate_arn
-          "alb.ingress.kubernetes.io/ssl-policy"                          = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+          "alb.ingress.kubernetes.io/listen-ports"                        = var.alb_tls == null ? jsonencode([{ HTTP = 80 }]) : jsonencode([{ HTTPS = 443 }])
           "alb.ingress.kubernetes.io/backend-protocol"                    = "HTTPS"
           "alb.ingress.kubernetes.io/target-type"                         = "ip"
           "alb.ingress.kubernetes.io/healthcheck-protocol"                = "HTTPS"
@@ -31,7 +29,10 @@ locals {
             { field = "http-request-method", httpRequestMethodConfig = { values = [routes[0].method] } }
           ])
           "alb.ingress.kubernetes.io/tags" = "EnvironmentId=${var.environment_id},Phase=4,Lifecycle=ephemeral,Shared=false"
-        }
+          }, var.alb_tls == null ? {} : {
+          "alb.ingress.kubernetes.io/certificate-arn" = var.alb_tls.certificate_arn
+          "alb.ingress.kubernetes.io/ssl-policy"      = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+        })
       }
       spec = {
         ingressClassName = "${local.name_prefix}-edge"

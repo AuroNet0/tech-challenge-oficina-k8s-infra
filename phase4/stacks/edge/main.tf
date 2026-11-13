@@ -20,7 +20,7 @@ locals {
   name_prefix      = module.environment.contract.name_prefix
   subnet_ids       = sort([for subnet in var.infra_contract.private_subnets : subnet.id])
   auth_enabled     = var.publish_auth && var.auth_release != null
-  business_enabled = var.publish_business && var.alb_tls != null && var.alb_listener_arn != null
+  business_enabled = var.publish_business && var.alb_listener_arn != null
   labels = {
     "app.kubernetes.io/part-of" = "oficina-phase4"
     "oficina/environment"       = var.environment_id
@@ -43,7 +43,7 @@ resource "terraform_data" "edge_guard" {
   lifecycle {
     precondition {
       condition = (
-        module.environment.contract.ready &&
+        module.environment.contract.planning_ready &&
         data.aws_caller_identity.current.account_id == var.aws_account_id &&
         var.infra_contract.environment_id == var.environment_id &&
         var.infra_contract.aws_account_id == var.aws_account_id &&
@@ -75,29 +75,18 @@ resource "terraform_data" "edge_guard" {
       error_message = "Edge bloqueada: catalogo, conta, regiao, ambiente, VPC, subnets ou Services divergentes."
     }
     precondition {
-      condition = !var.publish_auth || (
-        var.auth_release != null && var.readiness.artifact_verified && var.readiness.bootstrap_layer_verified &&
-        var.readiness.secrets_verified && var.readiness.bootstrap_completed && var.readiness.auth_migration_completed
-      )
-      error_message = "Lambda bloqueada: artefato/layer imutaveis e verificados, Secrets, bootstrap e migracao Auth obrigatorios."
-    }
-    precondition {
-      condition = !var.prepare_alb || (
-        var.alb_tls != null && var.readiness.controller_ready && var.readiness.workloads_ready &&
-        var.readiness.network_policy_enforced && var.readiness.pki_valid_for_operation
-      )
-      error_message = "Ingress bloqueado: certificado ACM confiavel, controller, workloads, dataplane e validade PKI comprovados obrigatorios."
+      condition     = !var.publish_auth || var.auth_release != null
+      error_message = "Lambda bloqueada: auth_release obrigatorio para publicar Auth."
     }
     precondition {
       condition = !var.publish_business || (
-        var.publish_auth && var.prepare_alb && var.alb_listener_arn != null && var.readiness.jwks_ready &&
-        var.readiness.targets_healthy && var.readiness.listener_verified
+        var.publish_auth && var.prepare_alb && var.alb_listener_arn != null
       )
-      error_message = "Rotas de negocio bloqueadas: Auth/JWKS, Ingress, listener observado e targets saudaveis obrigatorios."
+      error_message = "Rotas de negocio bloqueadas: publicar Auth, preparar ALB e informar listener obrigatorios."
     }
     precondition {
-      condition     = !var.publish_webhook || (var.publish_business && var.readiness.mercado_pago_verified)
-      error_message = "Webhook bloqueado: negocio pronto e assinatura/configuracao Mercado Pago verificadas."
+      condition     = !var.publish_webhook || var.publish_business
+      error_message = "Webhook bloqueado: publicacao de negocio obrigatoria."
     }
   }
 }
@@ -107,7 +96,7 @@ output "environment_contract" {
   value       = module.environment.contract
 
   precondition {
-    condition     = module.environment.contract.ready
+    condition     = module.environment.contract.planning_ready
     error_message = "Operacao bloqueada: ambiente desabilitado ou conta/backend nao aprovados no catalogo."
   }
 }

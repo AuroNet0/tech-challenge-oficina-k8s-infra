@@ -4,7 +4,10 @@ variable "aws_region" { type = string }
 variable "cluster_name" { type = string }
 variable "private_subnet_ids" { type = list(string) }
 variable "alb_security_group_id" { type = string }
-variable "certificate_arn" { type = string }
+variable "certificate_arn" {
+  type    = string
+  default = null
+}
 
 locals {
   base          = "arn:aws:elasticloadbalancing:${var.aws_region}:${var.aws_account_id}"
@@ -16,7 +19,7 @@ locals {
   requested     = { "aws:RequestTag/${local.cluster_tag}" = var.cluster_name, "aws:RequestTag/EnvironmentId" = var.environment_id }
   policy = {
     Version = "2012-10-17"
-    Statement = [
+    Statement = [for statement in [
       {
         Sid       = "RegionalDiscovery", Effect = "Allow", Resource = "*"
         Action    = ["ec2:DescribeAccountAttributes", "ec2:DescribeAddresses", "ec2:DescribeAvailabilityZones", "ec2:DescribeInternetGateways", "ec2:DescribeVpcs", "ec2:DescribeVpcPeeringConnections", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeInstances", "ec2:DescribeNetworkInterfaces", "ec2:DescribeTags", "ec2:GetSecurityGroupsForVpc", "ec2:DescribeRouteTables", "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeLoadBalancerAttributes", "elasticloadbalancing:DescribeListeners", "elasticloadbalancing:DescribeListenerCertificates", "elasticloadbalancing:DescribeSSLPolicies", "elasticloadbalancing:DescribeRules", "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:DescribeTargetGroupAttributes", "elasticloadbalancing:DescribeTargetHealth", "elasticloadbalancing:DescribeTags", "elasticloadbalancing:DescribeTrustStores", "elasticloadbalancing:DescribeListenerAttributes", "elasticloadbalancing:DescribeCapacityReservation"]
@@ -48,13 +51,13 @@ locals {
         Sid       = "OwnedAlbSecurityGroup", Effect = "Allow", Action = "elasticloadbalancing:SetSecurityGroups", Resource = local.load_balancer
         Condition = merge(local.owned, { "ForAllValues:StringEqualsIgnoreCase" = { "elasticloadbalancing:SecurityGroup" = [var.alb_security_group_id] }, Null = { "elasticloadbalancing:SecurityGroup" = "false" } })
       },
-      { Sid = "CreateHttpsListener", Effect = "Allow", Action = "elasticloadbalancing:CreateListener", Resource = [local.load_balancer, local.listeners[0]], Condition = { StringEquals = { "elasticloadbalancing:ListenerProtocol" = "HTTPS" } } },
+      { Sid = var.certificate_arn == null ? "CreateHttpListener" : "CreateHttpsListener", Effect = "Allow", Action = "elasticloadbalancing:CreateListener", Resource = [local.load_balancer, local.listeners[0]], Condition = { StringEquals = { "elasticloadbalancing:ListenerProtocol" = var.certificate_arn == null ? "HTTP" : "HTTPS" } } },
       {
         Sid    = "SelectedAlbListenersAndRules", Effect = "Allow", Resource = concat([local.load_balancer], local.listeners)
         Action = ["elasticloadbalancing:DeleteListener", "elasticloadbalancing:CreateRule", "elasticloadbalancing:DeleteRule", "elasticloadbalancing:ModifyListener", "elasticloadbalancing:ModifyListenerAttributes", "elasticloadbalancing:AddListenerCertificates", "elasticloadbalancing:RemoveListenerCertificates", "elasticloadbalancing:ModifyRule", "elasticloadbalancing:SetRulePriorities", "elasticloadbalancing:AddTags", "elasticloadbalancing:RemoveTags"]
       },
       { Sid = "KeepOwnershipTags", Effect = "Deny", Action = ["elasticloadbalancing:AddTags", "elasticloadbalancing:RemoveTags"], Resource = [local.load_balancer, local.target_groups], Condition = { "ForAnyValue:StringEquals" = { "aws:TagKeys" = [local.cluster_tag, "EnvironmentId"] }, Null = { "elasticloadbalancing:CreateAction" = "true" } } }
-    ]
+    ] : statement if statement.Sid != "SelectedCertificate" || var.certificate_arn != null]
   }
 }
 
