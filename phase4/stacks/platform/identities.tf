@@ -5,12 +5,12 @@ variable "alb_controller_identity_enabled" {
 
 variable "alb_identity_inputs" {
   description = "SG Edge e certificado ACM observados; nao cria ALB. Null bloqueia instalacao da identidade."
-  type        = object({ security_group_id = string, certificate_arn = string })
+  type        = object({ security_group_id = string, certificate_arn = optional(string) })
   default     = null
   validation {
     condition = var.alb_identity_inputs == null ? true : (
       can(regex("^sg-[0-9a-f]{17}$", var.alb_identity_inputs.security_group_id)) &&
-      can(regex("^arn:aws:acm:${var.aws_region}:${var.aws_account_id}:certificate/[0-9a-f-]{36}$", var.alb_identity_inputs.certificate_arn))
+      (var.alb_identity_inputs.certificate_arn == null ? true : can(regex("^arn:aws:acm:${var.aws_region}:${var.aws_account_id}:certificate/[0-9a-f-]{36}$", var.alb_identity_inputs.certificate_arn)))
     )
     error_message = "SG e certificado devem pertencer a conta/regiao e ser observados antes de instalar identidade ALB."
   }
