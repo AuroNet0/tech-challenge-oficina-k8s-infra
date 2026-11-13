@@ -36,20 +36,19 @@ resource "aws_iam_role_policy" "auth" {
 }
 
 resource "aws_lambda_function" "auth" {
-  count                          = var.publish_auth && var.auth_release != null ? 1 : 0
-  function_name                  = "${local.name_prefix}-auth"
-  role                           = aws_iam_role.auth.arn
-  runtime                        = "java21"
-  architectures                  = ["x86_64"]
-  handler                        = "br.com.fiap.oficina.auth.handler.AuthHandler::handleRequest"
-  s3_bucket                      = var.auth_release.bucket
-  s3_key                         = var.auth_release.key
-  s3_object_version              = var.auth_release.version_id
-  source_code_hash               = var.auth_release.sha256_base64
-  layers                         = [var.auth_release.bootstrap_layer_arn]
-  timeout                        = 12
-  memory_size                    = 512
-  reserved_concurrent_executions = 2
+  count             = var.publish_auth && var.auth_release != null ? 1 : 0
+  function_name     = "${local.name_prefix}-auth"
+  role              = aws_iam_role.auth.arn
+  runtime           = "java21"
+  architectures     = ["x86_64"]
+  handler           = "br.com.fiap.oficina.auth.handler.AuthHandler::handleRequest"
+  s3_bucket         = var.auth_release.bucket
+  s3_key            = var.auth_release.key
+  s3_object_version = var.auth_release.version_id
+  source_code_hash  = var.auth_release.sha256_base64
+  layers            = [var.auth_release.bootstrap_layer_arn]
+  timeout           = 12
+  memory_size       = 512
   vpc_config {
     subnet_ids         = local.subnet_ids
     security_group_ids = [aws_security_group.edge["lambda"].id]
