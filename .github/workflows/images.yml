@@ -1,4 +1,4 @@
-name: Images (temporary)
+name: Images
 
 on:
   workflow_dispatch:

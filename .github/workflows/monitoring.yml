@@ -1,0 +1,174 @@
+name: Monitoring (New Relic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: up instala o monitoramento no cluster; down remove
+        required: true
+        type: choice
+        options:
+          - up
+          - down
+      chart_version:
+        description: Versao do chart nri-bundle (vazio usa a ultima estavel)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+
+jobs:
+  monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_PAGER: ''
+      CLUSTER: tc-oficina-p4-demo-a
+      OBS_NAMESPACE: tc-oficina-p4-demo-a-observability
+      RELEASE: nri-bundle
+      SECRET_NAME: newrelic-license
+      ACTION: ${{ inputs.action }}
+      CHART_VERSION: ${{ inputs.chart_version }}
+      NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Preflight do cluster
+        id: preflight
+        run: |
+          set -Eeuo pipefail
+          if response=$(aws eks describe-cluster --name "$CLUSTER" 2>&1); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Cluster $CLUSTER encontrado."
+          elif grep -q 'ResourceNotFoundException' <<<"$response"; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cluster $CLUSTER ausente; nada a fazer. Execute o Deploy antes."
+          else
+            echo "::error::Nao foi possivel consultar o cluster: $response"
+            exit 1
+          fi
+
+      - name: Validar secret do New Relic
+        if: steps.preflight.outputs.ready == 'true' && inputs.action == 'up'
+        run: |
+          set -Eeuo pipefail
+          if [ -z "$NEW_RELIC_LICENSE_KEY" ]; then
+            echo "::error::Secret NEW_RELIC_LICENSE_KEY ausente neste repositorio."
+            exit 1
+          fi
+
+      - name: Set up Helm
+        if: steps.preflight.outputs.ready == 'true'
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Configurar kubeconfig
+        if: steps.preflight.outputs.ready == 'true'
+        run: |
+          set -Eeuo pipefail
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          kubectl get nodes --request-timeout=30s
+
+      - name: Instalar monitoramento
+        if: steps.preflight.outputs.ready == 'true' && inputs.action == 'up'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao instalar o monitoramento; confira namespace, secret e pods do Helm."' ERR
+
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ${OBS_NAMESPACE}
+            labels:
+              app.kubernetes.io/part-of: oficina-phase4
+              oficina/managed-by: monitoring
+              pod-security.kubernetes.io/enforce: privileged
+          EOF
+
+          kubectl -n "$OBS_NAMESPACE" create secret generic "$SECRET_NAME" \
+            --from-literal=licenseKey="$NEW_RELIC_LICENSE_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          cat > /tmp/nri-values.yaml <<EOF
+          global:
+            cluster: ${CLUSTER}
+            customSecretName: ${SECRET_NAME}
+            customSecretLicenseKey: licenseKey
+            lowDataMode: true
+          newrelic-infrastructure:
+            enabled: true
+            controlPlane:
+              enabled: false
+          kube-state-metrics:
+            enabled: true
+          nri-kube-events:
+            enabled: true
+          newrelic-logging:
+            enabled: true
+          nri-metadata-injection:
+            enabled: false
+          newrelic-pixie:
+            enabled: false
+          pixie-chart:
+            enabled: false
+          EOF
+
+          helm repo add newrelic https://helm-charts.newrelic.com
+          helm repo update newrelic
+          version_args=()
+          if [ -n "$CHART_VERSION" ]; then
+            version_args=(--version "$CHART_VERSION")
+          fi
+          helm upgrade --install "$RELEASE" newrelic/nri-bundle \
+            "${version_args[@]}" \
+            --namespace "$OBS_NAMESPACE" \
+            --values /tmp/nri-values.yaml \
+            --wait --timeout 10m
+
+          {
+            echo '### Monitoramento New Relic instalado'
+            echo
+            echo "- Cluster: \`$CLUSTER\`"
+            echo "- Namespace: \`$OBS_NAMESPACE\`"
+            echo "- Chart: \`$(helm list -n "$OBS_NAMESPACE" -o json | jq -r '.[0].chart')\`"
+            echo
+            echo '```'
+            kubectl -n "$OBS_NAMESPACE" get pods
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover monitoramento
+        if: steps.preflight.outputs.ready == 'true' && inputs.action == 'down'
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao remover o monitoramento; confira o namespace de observabilidade."' ERR
+          if helm status "$RELEASE" -n "$OBS_NAMESPACE" >/dev/null 2>&1; then
+            helm uninstall "$RELEASE" -n "$OBS_NAMESPACE" --wait --timeout 10m
+          else
+            echo "Release $RELEASE ausente; nada a remover."
+          fi
+          kubectl delete namespace "$OBS_NAMESPACE" --ignore-not-found --wait=true --timeout=300s
+          echo '### Monitoramento New Relic removido' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostico em falha
+        if: failure() && steps.preflight.outputs.ready == 'true'
+        run: |
+          kubectl -n "$OBS_NAMESPACE" get pods -o wide || true
+          kubectl -n "$OBS_NAMESPACE" get events --sort-by=.lastTimestamp | tail -30 || true
