@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       images_run_id:
-        description: Successful images.yml run containing images.json
+        description: images.yml (success) or deploy.yml (any finished run) containing the images.json artifact
         required: true
         type: string
 
@@ -51,7 +51,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::[1/4] Falha ao validar confirmacao, AWS_ROLE_ARN ou run de images.yml."' ERR
+          trap 'echo "::error::[1/4] Falha ao validar confirmacao, AWS_ROLE_ARN ou run de images.yml ou deploy.yml."' ERR
           {
             if [[ "$DESTROY_CONFIRM" != 'destroy demo-a' ]]; then
               echo '::error::Digite exatamente "destroy demo-a" no input confirm; nenhum recurso foi removido.'
@@ -60,8 +60,9 @@ jobs:
             test -n "$AWS_ROLE_ARN"
             [[ "$IMAGES_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGES_RUN_ID}" > /tmp/destroy-images-run.json
-            jq -e '.path == ".github/workflows/images.yml" and
-              .status == "completed" and .conclusion == "success"' /tmp/destroy-images-run.json
+            jq -e '.status == "completed" and
+              ((.path == ".github/workflows/images.yml" and .conclusion == "success") or
+               .path == ".github/workflows/deploy.yml")' /tmp/destroy-images-run.json
           } 2>&1 | tee -a "$DESTROY_LOG"
 
       - name: '[1/4] Credenciais AWS OIDC'
