@@ -1026,6 +1026,9 @@ jobs:
             if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
               jq --slurpfile jwt /tmp/platform-jwt.json --slurpfile edge /tmp/platform-edge-contract.json '
                 .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false |
+                .mercado_pago = {enabled: true, notification_url: ($jwt[0].issuer + "/api/v1/webhooks/mercado-pago"),
+                  success_url: "https://example.com/success", failure_url: "https://example.com/failure",
+                  pending_url: "https://example.com/pending"} |
                 .alb_controller_identity_enabled = true |
                 .alb_identity_inputs = {security_group_id: $edge[0].alb_security_group_id, certificate_arn: null}
               ' phase4/stacks/platform/tfvars.json > /tmp/platform-apps-tfvars.json
@@ -1035,7 +1038,7 @@ jobs:
               printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
               printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
               if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
-                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
+                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration disabled; Mercado Pago habilitado com confirmacao por reconciliacao (webhook nao publicado).\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
               else
                 printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
               fi
@@ -1826,6 +1829,9 @@ jobs:
             if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
               jq --slurpfile jwt /tmp/platform-jwt.json --slurpfile edge /tmp/platform-edge-contract.json '
                 .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false |
+                .mercado_pago = {enabled: true, notification_url: ($jwt[0].issuer + "/api/v1/webhooks/mercado-pago"),
+                  success_url: "https://example.com/success", failure_url: "https://example.com/failure",
+                  pending_url: "https://example.com/pending"} |
                 .alb_controller_identity_enabled = true |
                 .alb_identity_inputs = {security_group_id: $edge[0].alb_security_group_id, certificate_arn: null}
               ' phase4/stacks/platform/tfvars.json > /tmp/platform-apps-tfvars.json
@@ -1835,7 +1841,7 @@ jobs:
               printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
               printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
               if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
-                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
+                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration disabled; Mercado Pago habilitado com confirmacao por reconciliacao (webhook nao publicado).\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
               else
                 printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
               fi
@@ -2221,6 +2227,9 @@ jobs:
             if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
               jq --slurpfile jwt /tmp/platform-jwt.json --slurpfile edge /tmp/platform-edge-contract.json '
                 .jwt = $jwt[0] | .application_replicas = 1 | .auth_migration_enabled = false |
+                .mercado_pago = {enabled: true, notification_url: ($jwt[0].issuer + "/api/v1/webhooks/mercado-pago"),
+                  success_url: "https://example.com/success", failure_url: "https://example.com/failure",
+                  pending_url: "https://example.com/pending"} |
                 .alb_controller_identity_enabled = true |
                 .alb_identity_inputs = {security_group_id: $edge[0].alb_security_group_id, certificate_arn: null}
               ' phase4/stacks/platform/tfvars.json > /tmp/platform-apps-tfvars.json
@@ -2230,7 +2239,7 @@ jobs:
               printf '### Platform inputs\n\nMode: `%s`; images run: `%s`.\n\n' "$PLATFORM_MODE" "$IMAGES_RUN_ID"
               printf 'New Relic chart: `6.0.0` (semver accepted by variables.tf; Helm is not installed).\n\n'
               if [[ "$PLATFORM_STAGE" == apps || "$PLATFORM_STAGE" == controller ]]; then
-                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration e Mercado Pago disabled.\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
+                printf 'Stage %s; JWT do edge; uma replica por Deployment; identidade ALB habilitada, certificado null; migration disabled; Mercado Pago habilitado com confirmacao por reconciliacao (webhook nao publicado).\n\n### Addon versions\n\n```json\n' "$PLATFORM_STAGE"
               else
                 printf 'JWT null; replicas zero; Mercado Pago disabled.\n\n### Addon versions\n\n```json\n'
               fi

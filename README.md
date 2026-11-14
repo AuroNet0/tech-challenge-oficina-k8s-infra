@@ -53,7 +53,7 @@ flowchart LR
 
 O [Deploy](.github/workflows/deploy.yml) usa `alb_tls: null`. O [Ingress](phase4/stacks/edge/ingress.tf) declara ALB interno com listener HTTP 80, destinos por IP, backend HTTPS 8443 e health check HTTPS em `/actuator/health/readiness`. As configurações dos pods, bancos e chamadas internas estão em [applications.tf](phase4/stacks/platform/applications.tf), [auth-internal.tf](phase4/stacks/platform/auth-internal.tf) e [mtls_contract](phase4/stacks/platform/outputs.tf).
 
-A exposição pública segue uma allowlist de métodos e caminhos em [routes.tf](phase4/stacks/edge/routes.tf). O Ingress deriva dessa lista e restringe também o método HTTP. Não há rota pública genérica para `/internal/*`. O webhook Mercado Pago é opcional no stack e permanece desabilitado no Deploy.
+A exposição pública segue uma allowlist de métodos e caminhos em [routes.tf](phase4/stacks/edge/routes.tf). O Ingress deriva dessa lista e restringe também o método HTTP. Não há rota pública genérica para `/internal/*`. O Deploy habilita o Mercado Pago no billing-service (checkout no sandbox). O webhook público é opcional no stack e permanece desabilitado; a confirmação do pagamento ocorre pela reconciliação periódica do billing-service, que consulta a API do Mercado Pago.
 
 As rotas do API Gateway usam `authorization_type = "NONE"`. A validação do JWT fica nos próprios serviços, configurados com issuer, audience e JWKS por [applications.tf](phase4/stacks/platform/applications.tf), a partir do [contrato JWT do edge](phase4/stacks/edge/outputs.tf). O job E2E verifica os resultados de autenticação e autorização descritos adiante.
 
@@ -211,7 +211,7 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 
 - **Role de automação ampla no cluster:** o Deploy passa `AWS_ROLE_ARN` como administrador do EKS, e [eks.tf](phase4/stacks/infra/eks.tf) associa `AmazonEKSClusterAdminPolicy` no escopo do cluster. O conjunto completo das permissões IAM dessa role é **não identificado**.
 - **Role compartilhada:** os jobs de imagens, infra, platform e edge usam a mesma variável `AWS_ROLE_ARN`. Os repositórios dos serviços também a usam, via OIDC, no deploy automático após o merge na `main`.
-- **Webhook Mercado Pago desabilitado no Deploy:** o checkout pode ser criado, mas a confirmação do pagamento não chega ao billing-service; a Saga permanece aguardando o pagamento. O fluxo de compensação (orçamento rejeitado) não depende do webhook.
+- **Webhook Mercado Pago não publicado:** a confirmação do pagamento não é imediata; depende da reconciliação periódica do billing-service (intervalo de cerca de um minuto). A conta vendedora deve ser um usuário de teste do Mercado Pago, e o pagamento deve ser feito com um comprador de teste.
 - **Ambiente efêmero:** [ecr.tf](phase4/stacks/infra/ecr.tf) usa `force_delete = true`; o Destroy elimina repositórios ECR e imagens. O próximo Deploy recria os repositórios e reconstrói imagens quando as tags estão ausentes. O RDS é destruído sem snapshot final e com remoção de backups automatizados, conforme [rds.tf](phase4/stacks/infra/rds.tf).
 
 ## 7. Estrutura do repositório
