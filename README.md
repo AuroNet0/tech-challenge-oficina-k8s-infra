@@ -2,7 +2,7 @@
 
 Plataforma efêmera da Fase 4 do Tech Challenge FIAP, organizada em quatro microsserviços com repositórios próprios: Auth, OS, Execution e Billing. O [Deploy](.github/workflows/deploy.yml) opera `demo-a`, em `us-east-1`.
 
-Este documento descreve o código e as verificações declaradas, sem presumir um ambiente em execução. As fontes são os workflows indicados, `phase4/stacks`, `phase4/modules`, o [catálogo](phase4/environments/catalog.json) e `scripts/platform-secrets`. A única consulta a `images.yml` é a confirmação de seu cabeçalho, solicitada ao final.
+Este documento descreve o código e as verificações declaradas, sem presumir um ambiente em execução. As fontes são os workflows indicados, `phase4/stacks`, `phase4/modules`, o [catálogo](phase4/environments/catalog.json) e `scripts/platform-secrets`.
 
 | Repositório | Papel identificado |
 | --- | --- |
@@ -94,9 +94,9 @@ As justificativas resumem a organização declarada. A motivação histórica da
 
 | Decisão | Justificativa e evidência disponível |
 | --- | --- |
-| Saga no contexto de OS | Há consulta de Saga em OS e permissões RabbitMQ para `os.saga.events` e `execution.diagnostic.start`. Orquestração pelo os-service, etapas e compensações: **não identificado** nas fontes permitidas. Referência solicitada: [README do os-service, seção Saga](https://github.com/AuroNet0/tech-challenge-oficina-os-service/blob/main/README.md#saga); conteúdo e âncora não confirmados. Fontes locais: [rotas](phase4/stacks/edge/routes.tf) e [permissões](scripts/platform-secrets/platform_secrets.py). |
-| Quatro serviços | A separação de Auth, OS, Execution e Billing corresponde aos quatro repositórios, grupos de rotas e bancos próprios declarados. O Deploy constrói cada serviço em uma matriz; pipeline próprio em cada repositório: **não identificado**. Fontes: [Deploy](.github/workflows/deploy.yml), [rotas](phase4/stacks/edge/routes.tf) e [dados](phase4/stacks/platform/applications.tf). |
-| PostgreSQL e MongoDB | PostgreSQL atende Auth, OS e Billing; MongoDB atende Execution. A associação está em [applications.tf](phase4/stacks/platform/applications.tf) e [auth-internal.tf](phase4/stacks/platform/auth-internal.tf). A justificativa específica baseada em dados relacionais/transacionais ou modelo documental: **não identificado**. |
+| Saga orquestrada pelo OS | A Saga é orquestrada pelo os-service; Execution (diagnóstico e reparo) e Billing (orçamento e pagamento) são participantes. Ao rejeitar o orçamento, a OS é cancelada e a Saga termina `COMPENSATED`. Concentrar estado da OS e compensação em um único orquestrador evita dependência circular entre os participantes. Detalhes no [README do os-service](https://github.com/AuroNet0/tech-challenge-oficina-os-service). Evidências locais: [rotas](phase4/stacks/edge/routes.tf) e [permissões RabbitMQ](scripts/platform-secrets/platform_secrets.py) para `os.saga.events` e `execution.diagnostic.start`. |
+| Quatro serviços | Auth, OS, Execution e Billing têm repositório, pipeline de CI/CD, imagem, manifests e banco próprios. Cada serviço publica a imagem no ECR e atualiza seu Deployment no Kubernetes de forma independente a cada push na `main`; o Deploy deste repositório constrói os quatro de uma vez para subir o ambiente do zero. Fontes: [Deploy](.github/workflows/deploy.yml), [rotas](phase4/stacks/edge/routes.tf) e [dados](phase4/stacks/platform/applications.tf). |
+| PostgreSQL e MongoDB | PostgreSQL atende Auth, OS e Billing, que têm dados relacionais e transacionais, com integridade referencial e migrações versionadas. MongoDB atende Execution, cujos diagnósticos, reparos e histórico são documentos com itens de estrutura variável, lidos e gravados como um todo. Fontes: [applications.tf](phase4/stacks/platform/applications.tf) e [auth-internal.tf](phase4/stacks/platform/auth-internal.tf). |
 | RabbitMQ | Um broker com credenciais e permissões por serviço sustenta comandos/eventos; as permissões incluem comando de diagnóstico e eventos de Saga. Catálogo completo de mensagens: **não identificado**. Fontes: [applications.tf](phase4/stacks/platform/applications.tf) e [platform_secrets.py](scripts/platform-secrets/platform_secrets.py). |
 | AWS EKS/API Gateway/Lambda | A divisão declarada concentra pods no EKS, entrada pública no API Gateway e login/JWKS na Lambda, com integração privada para o negócio. Fontes: [EKS](phase4/stacks/infra/eks.tf), [integrações](phase4/stacks/edge/routes.tf) e [Lambda](phase4/stacks/edge/lambda.tf). |
 
@@ -107,7 +107,7 @@ As justificativas resumem a organização declarada. A motivação histórica da
 O [Deploy](.github/workflows/deploy.yml) é manual (`workflow_dispatch`) e valida:
 
 - Variável de repositório `AWS_ROLE_ARN` com ARN de role IAM válido da conta do catálogo. A identidade STS precisa corresponder à role assumida.
-- Autenticação AWS por OIDC, com `id-token: write` e `aws-actions/configure-aws-credentials`. A role deve aceitar a federação OIDC para essa execução. Trust policy concreta, principals e condições de subject/audience: **não identificado**; a role de automação não é declarada nas fontes permitidas.
+- Autenticação AWS por OIDC, com `id-token: write` e `aws-actions/configure-aws-credentials`. A role deve aceitar a federação OIDC para essa execução. A trust policy limita a federação OIDC do GitHub aos repositórios `tech-challenge-oficina-*`.
 - Segredos de entrada no Secrets Manager, recebidos pelos inputs. O Resolve valida formato dos ARNs, conta/região e existência por `describe-secret`, sem ler valores nessa etapa.
 - Segredo `/oficina/phase4/demo-a/auth-signing` previamente existente. `ResourceNotFoundException` interrompe o Resolve; outros erros nessa consulta geram aviso. O formato de seu conteúdo é **não identificado** nas fontes permitidas.
 - Buckets `tc-oficina-p4-demo-a-artifacts` e `tech-challenge-oficina-terraform-state-b1cfa326` existentes e acessíveis na conta esperada. Os nomes constam no workflow; o bucket de state consta também no [catálogo](phase4/environments/catalog.json).
@@ -144,7 +144,7 @@ Ordem real dos jobs:
 10. **E2E:** semeia um usuário ATENDENTE e verifica login/autorização.
 11. **Resumo:** executa com `always()` e reúne os resultados.
 
-Tempo aproximado de **45–60 minutos após a infra: não identificado** nas fontes permitidas. Timeouts de jobs são limites, não medições de duração.
+Tempo aproximado de 45 a 60 minutos após a infra (estimativa; varia por execução). Timeouts de jobs são limites, não medições de duração.
 
 Deploy e Destroy usam o grupo de concorrência `phase4-demo-a-mutation`, com `cancel-in-progress: false`, conforme os dois workflows.
 
@@ -168,7 +168,7 @@ A auditoria é independente dos states, mas é um passo posterior no mesmo job, 
 
 São preservados o bucket de artefatos, o bucket de state, `auth-signing` e os dois segredos externos de entrada. Fontes: [Destroy](.github/workflows/destroy.yml) e [destroy_secrets](scripts/platform-secrets/deliver.py).
 
-**Custo aproximado de US$ 9/dia com o ambiente de pé: não identificado** nas fontes permitidas. Execute Destroy após o uso; os recursos têm ciclo de vida efêmero declarado no [módulo de ambiente](phase4/modules/environment/main.tf).
+**Custo aproximado de US$ 9/dia com o ambiente de pé (estimativa).** Execute Destroy após o uso; os recursos têm ciclo de vida efêmero declarado no [módulo de ambiente](phase4/modules/environment/main.tf).
 
 ### Monitoramento (New Relic)
 
@@ -192,11 +192,13 @@ O job `e2e` do [Deploy](.github/workflows/deploy.yml) lê as credenciais de smok
 
 O job registra status esperados/obtidos no resumo, mascara senha/token e limpa o Secret SQL temporário com `always()`. Esses testes verificam login e restrições de acesso; não demonstram uma execução completa da Saga.
 
-## Fluxo completo no Postman
+### Fluxo completo no Postman
 
 Arquivo disponível: [coleção Oficina — Fluxo completo da OS (demo)](docs/postman/full-cycle-collection.json).
 
-A coleção realiza os logins dos quatro perfis: Atendente, Mecânico, Cliente e Gerente. O fluxo principal cria filial, cliente e veículo e abre a OS pelo os-service; executa o diagnóstico pelo Execution, aprova o orçamento no Billing, realiza o reparo e o checkout do pagamento e consulta o histórico da OS e o estado final da Saga. A pasta `Compensação (orçamento rejeitado)` rejeita o orçamento e verifica Saga `COMPENSATED` e OS `CANCELADA`.
+A coleção realiza os logins dos quatro perfis: Atendente, Mecânico, Cliente e Gerente. O fluxo principal consulta a filial, o cliente e o veículo de demonstração (cadastrados pelo workflow `Seed users`) e abre a OS pelo os-service; executa o diagnóstico pelo Execution, aprova o orçamento no Billing, realiza o reparo e o checkout do pagamento e consulta o histórico da OS e o estado final da Saga. A pasta `Compensação (orçamento rejeitado)` rejeita o orçamento e verifica Saga `COMPENSATED` e OS `CANCELADA`.
+
+Antes de executar, rode uma vez o workflow `Seed users` (Actions), informando `smoke_secret_arn`. Ele cria os usuários `demo.mecanico@example.invalid`, `demo.gerente@example.invalid` e `demo.cliente@example.invalid` (mesma senha do segredo de smoke), a filial, o cliente e o veículo de demonstração e as permissões no os-service e no Auth, porque os serviços não expõem endpoint para conceder permissões. Um gatilho de demonstração atribui o Mecânico a cada OS aberta. Tudo é removido junto com o ambiente no Destroy.
 
 1. Importe a coleção e o ambiente `Oficina - AWS` (arquivo `docs/postman/enviroment.json` do repositório [tech-challenge-oficina-auth](https://github.com/AuroNet0/tech-challenge-oficina-auth/blob/main/docs/postman/enviroment.json)).
 2. Selecione o ambiente `Oficina - AWS` e preencha `baseUrl` com a URL do API Gateway exibida pelo Deploy e as credenciais dos quatro perfis: `emailAtendente`/`senhaAtendente`, `emailMecanico`/`senhaMecanico`, `emailCliente`/`senhaCliente` e `emailGerente`/`senhaGerente`.
@@ -208,7 +210,8 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 ## 6. Limitações conhecidas
 
 - **Role de automação ampla no cluster:** o Deploy passa `AWS_ROLE_ARN` como administrador do EKS, e [eks.tf](phase4/stacks/infra/eks.tf) associa `AmazonEKSClusterAdminPolicy` no escopo do cluster. O conjunto completo das permissões IAM dessa role é **não identificado**.
-- **Role compartilhada no Deploy:** os jobs de imagens, infra, platform e edge usam a mesma variável. Reutilização por CD próprio nos repositórios dos serviços: **não identificado** nas fontes permitidas.
+- **Role compartilhada:** os jobs de imagens, infra, platform e edge usam a mesma variável `AWS_ROLE_ARN`. Os repositórios dos serviços também a usam, via OIDC, no deploy automático após o merge na `main`.
+- **Webhook Mercado Pago desabilitado no Deploy:** o checkout pode ser criado, mas a confirmação do pagamento não chega ao billing-service; a Saga permanece aguardando o pagamento. O fluxo de compensação (orçamento rejeitado) não depende do webhook.
 - **Ambiente efêmero:** [ecr.tf](phase4/stacks/infra/ecr.tf) usa `force_delete = true`; o Destroy elimina repositórios ECR e imagens. O próximo Deploy recria os repositórios e reconstrói imagens quando as tags estão ausentes. O RDS é destruído sem snapshot final e com remoção de backups automatizados, conforme [rds.tf](phase4/stacks/infra/rds.tf).
 
 ## 7. Estrutura do repositório
@@ -219,6 +222,7 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 | [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | Provisionamento, build, publicação e E2E. |
 | [.github/workflows/destroy.yml](.github/workflows/destroy.yml) | Remoção em quatro fases e auditoria residual. |
 | [.github/workflows/images.yml](.github/workflows/images.yml) | Workflow `Images`; seu run bem-sucedido é aceito pelo Destroy como origem de `images.json`. |
+| [.github/workflows/seed-users.yml](.github/workflows/seed-users.yml) | Workflow `Seed users`: cria os usuários Mecânico, Gerente e Cliente, a filial, o cliente e o veículo de demonstração, as permissões no os-service e no Auth e o gatilho que atribui o Mecânico a cada OS. Execução única por ambiente, idempotente. |
 | [.github/workflows/monitoring.yml](.github/workflows/monitoring.yml) | Workflow `Monitoring (New Relic)`: instala (`up`) ou remove (`down`) o monitoramento do cluster com o chart nri-bundle, usando o secret NEW_RELIC_LICENSE_KEY do repositório. |
 | [phase4/stacks/infra](phase4/stacks/infra/main.tf) | Infraestrutura AWS e contratos. |
 | [phase4/stacks/platform](phase4/stacks/platform/main.tf) | Suporte EKS e contratos/manifests Kubernetes. |
@@ -228,5 +232,4 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 | [phase4/environments/catalog.json](phase4/environments/catalog.json) | Conta, região, backend e chaves dos states. |
 | [scripts/platform-secrets](scripts/platform-secrets/deliver.py) | Entrega, validação e remoção de segredos efêmeros. |
 
-Workflows atuais: `Deploy`, `Destroy`, `Images` e `Monitoring (New Relic)`.
-
+Workflows atuais: `Deploy`, `Destroy`, `Images`, `Monitoring (New Relic)` e `Seed users`.

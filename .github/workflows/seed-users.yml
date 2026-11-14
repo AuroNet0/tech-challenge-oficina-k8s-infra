@@ -7,21 +7,6 @@ on:
         description: ARN do segredo de smoke (a senha dele e reutilizada para os usuarios de demonstracao)
         required: true
         type: string
-      filial_id:
-        description: UUID da filial criada (vazio concede so o necessario para criar filial)
-        required: false
-        type: string
-        default: ''
-      cliente_id:
-        description: UUID do cliente criado a vincular ao usuario CLIENTE (vazio nao vincula)
-        required: false
-        type: string
-        default: ''
-      os_id:
-        description: UUID da OS aberta para atribuir ao mecanico (vazio nao atribui)
-        required: false
-        type: string
-        default: ''
 
 permissions:
   id-token: write
@@ -45,9 +30,6 @@ jobs:
       AWS_REGION: us-east-1
       AWS_PAGER: ''
       SMOKE_SECRET_ARN: ${{ inputs.smoke_secret_arn }}
-      FILIAL_ID: ${{ inputs.filial_id }}
-      CLIENTE_ID: ${{ inputs.cliente_id }}
-      OS_ID: ${{ inputs.os_id }}
       KUBECONFIG: /tmp/seed-kubeconfig
     steps:
       - uses: actions/checkout@v4
@@ -68,22 +50,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-
-      - name: Validar entradas
-        run: |
-          set -Eeuo pipefail
-          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-          for name in FILIAL_ID CLIENTE_ID OS_ID; do
-            value="${!name}"
-            if [ -n "$value" ] && ! [[ "$value" =~ $uuid_pattern ]]; then
-              echo "::error::${name} nao e um UUID valido."
-              exit 1
-            fi
-          done
-          if [ -n "$OS_ID" ] && [ -z "$FILIAL_ID" ]; then
-            echo "::error::os_id exige filial_id."
-            exit 1
-          fi
 
       - name: Ler outputs da infra e da plataforma
         run: |
@@ -156,28 +122,23 @@ jobs:
               credentials = json.loads(Path("/tmp/credentials.json").read_text())
               prefix = infra["name_prefix"]
 
-              def optional_uuid(name):
-                  value = os.environ.get(name, "").strip()
-                  return str(uuid.UUID(value)) if value else ""
-
-              filial_id = optional_uuid("FILIAL_ID")
-              cliente_id = optional_uuid("CLIENTE_ID")
-              os_id = optional_uuid("OS_ID")
-
               def literal(value):
                   return "'" + str(value).replace("'", "''") + "'"
 
-              def user_uuid(email):
-                  return str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + email))
+              def derived(name):
+                  return str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + name))
 
-              smoke_id = user_uuid(credentials["email"])
+              smoke_id = derived(credentials["email"])
               users = {
                   "mecanico": ("demo.mecanico@example.invalid", "Demo FIAP Mecanico", "MECANICO"),
                   "gerente": ("demo.gerente@example.invalid", "Demo FIAP Gerente", "GERENTE"),
                   "cliente": ("demo.cliente@example.invalid", "Demo FIAP Cliente", "CLIENTE"),
               }
-              ids = {key: user_uuid(value[0]) for key, value in users.items()}
-              actor = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/seed-grant-actor"))
+              ids = {key: derived(value[0]) for key, value in users.items()}
+              actor = derived("seed-grant-actor")
+              filial_id = derived("demo-filial")
+              cliente_id = derived("demo-cliente")
+              veiculo_id = derived("demo-veiculo")
 
               auth = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-users',0));"]
               for key, (email, nome, papel) in users.items():
@@ -191,15 +152,13 @@ jobs:
                               + " AND nome LIKE 'Demo FIAP %') THEN RAISE EXCEPTION 'DEMO_IDENTITY_OWNERSHIP_REJECTED'; END IF; END $$;")
                   auth.append("INSERT INTO usuario_papeis(usuario_id,papel) VALUES (" + literal(ids[key])
                               + "," + literal(papel) + ") ON CONFLICT DO NOTHING;")
-                  if key == "cliente" and cliente_id:
-                      auth.append("INSERT INTO usuario_clientes(usuario_id,papel,cliente_id,criado_em) VALUES ("
-                                  + literal(ids[key]) + ",'CLIENTE'," + literal(cliente_id)
-                                  + ",now()) ON CONFLICT DO NOTHING;")
+              auth.append("INSERT INTO usuario_clientes(usuario_id,papel,cliente_id,criado_em) VALUES ("
+                          + literal(ids["cliente"]) + ",'CLIENTE'," + literal(cliente_id) + ",now()) ON CONFLICT DO NOTHING;")
               auth.append("COMMIT;")
 
-              def operational(usuario, filial, capability):
+              def operational(usuario, capability):
                   return ("INSERT INTO operational_grants(id,usuario_id,filial_id,capability,concedido_por,concedido_em) VALUES ("
-                          + ",".join(map(literal, (uuid.uuid4(), usuario, filial, capability, actor)))
+                          + ",".join(map(literal, (uuid.uuid4(), usuario, filial_id, capability, actor)))
                           + ",now()) ON CONFLICT DO NOTHING;")
 
               def administrative(usuario, capability, filial):
@@ -207,27 +166,42 @@ jobs:
                           + literal(uuid.uuid4()) + "," + literal(usuario) + "," + literal(capability) + ","
                           + (literal(filial) if filial else "NULL") + "," + literal(actor) + ",now()) ON CONFLICT DO NOTHING;")
 
+              mechanic_capabilities = ("OPERATIONAL_READ", "VEHICLE_OPERATIONAL_READ", "DIAGNOSTIC_READ",
+                                       "DIAGNOSTIC_WRITE", "DIAGNOSTIC_COMPLETE", "REPAIR_READ", "REPAIR_WRITE",
+                                       "REPAIR_COMPLETE", "HISTORY_READ")
+              capability_array = "ARRAY[" + ",".join(map(literal, mechanic_capabilities)) + "]"
+              mechanic = literal(ids["mecanico"]) + "::uuid"
+              grantor = literal(actor) + "::uuid"
+              backfill = ("INSERT INTO mechanic_assignments(id,usuario_id,os_id,capability,concedido_por,concedido_em) "
+                          "SELECT gen_random_uuid()," + mechanic + ",o.id,capability," + grantor
+                          + ",now() FROM ordens_servico o CROSS JOIN unnest(" + capability_array
+                          + ") AS capability ON CONFLICT DO NOTHING;")
+              trigger_function = ("CREATE OR REPLACE FUNCTION demo_assign_mechanic() RETURNS trigger LANGUAGE plpgsql AS $fn$ "
+                                  "BEGIN INSERT INTO mechanic_assignments(id,usuario_id,os_id,capability,concedido_por,concedido_em) "
+                                  "SELECT gen_random_uuid()," + mechanic + ",NEW.id,capability," + grantor
+                                  + ",now() FROM unnest(" + capability_array
+                                  + ") AS capability ON CONFLICT DO NOTHING; RETURN NEW; END $fn$;")
+
               os_sql = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-grants',0));",
-                        administrative(ids["gerente"], "BRANCH_CREATE", "")]
-              if filial_id:
-                  os_sql.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM filiais WHERE id=" + literal(filial_id)
-                                + ") THEN RAISE EXCEPTION 'FILIAL_NOT_FOUND'; END IF; END $$;")
-                  for capability in ("OS_READ", "OS_OPEN", "CLIENT_READ", "CLIENT_CREATE", "VEHICLE_READ",
-                                     "VEHICLE_CREATE", "BRANCH_READ"):
-                      os_sql.append(operational(smoke_id, filial_id, capability))
-                  for capability in ("OS_READ", "BRANCH_READ"):
-                      os_sql.append(operational(ids["gerente"], filial_id, capability))
-                  os_sql.append(administrative(ids["gerente"], "SAGA_INSPECT", filial_id))
-              if os_id:
-                  os_sql.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM ordens_servico WHERE id=" + literal(os_id)
-                                + ") THEN RAISE EXCEPTION 'OS_NOT_FOUND'; END IF; END $$;")
-                  for capability in ("OPERATIONAL_READ", "VEHICLE_OPERATIONAL_READ", "DIAGNOSTIC_READ",
-                                     "DIAGNOSTIC_WRITE", "DIAGNOSTIC_COMPLETE", "REPAIR_READ", "REPAIR_WRITE",
-                                     "REPAIR_COMPLETE", "HISTORY_READ"):
-                      os_sql.append("INSERT INTO mechanic_assignments(id,usuario_id,os_id,capability,concedido_por,concedido_em) VALUES ("
-                                    + ",".join(map(literal, (uuid.uuid4(), ids["mecanico"], os_id, capability, actor)))
-                                    + ",now()) ON CONFLICT DO NOTHING;")
-              os_sql.append("COMMIT;")
+                        "INSERT INTO filiais(id,nome,codigo,cidade,uf,ativo,created_at,updated_at) VALUES ("
+                        + literal(filial_id) + ",'Filial Centro (demo)','DEMO-01','Sao Paulo','SP',true,now(),now()) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO clientes(id,nome,cpf_cnpj,email,telefone,ativo,created_at,updated_at) VALUES ("
+                        + literal(cliente_id) + ",'Cliente Demo FIAP','52998224725','cliente.demo@example.invalid','11999990000',true,now(),now()) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO veiculos(id,cliente_id,placa,marca,modelo,ano,created_at,updated_at) VALUES ("
+                        + literal(veiculo_id) + "," + literal(cliente_id) + ",'DEM1A23','Fiat','Uno',2018,now(),now()) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO cliente_filiais(cliente_id,filial_id) VALUES (" + literal(cliente_id) + "," + literal(filial_id) + ") ON CONFLICT DO NOTHING;",
+                        "INSERT INTO veiculo_filiais(veiculo_id,filial_id) VALUES (" + literal(veiculo_id) + "," + literal(filial_id) + ") ON CONFLICT DO NOTHING;",
+                        administrative(ids["gerente"], "BRANCH_CREATE", ""),
+                        administrative(ids["gerente"], "SAGA_INSPECT", filial_id)]
+              for capability in ("OS_READ", "OS_OPEN", "CLIENT_READ", "CLIENT_CREATE", "VEHICLE_READ",
+                                 "VEHICLE_CREATE", "BRANCH_READ"):
+                  os_sql.append(operational(smoke_id, capability))
+              for capability in ("OS_READ", "BRANCH_READ"):
+                  os_sql.append(operational(ids["gerente"], capability))
+              os_sql.extend([backfill, trigger_function,
+                             "DROP TRIGGER IF EXISTS demo_assign_mechanic ON ordens_servico;",
+                             "CREATE TRIGGER demo_assign_mechanic AFTER INSERT ON ordens_servico FOR EACH ROW EXECUTE FUNCTION demo_assign_mechanic();",
+                             "COMMIT;"])
               Path("/tmp/seed-auth.sql").write_text("\n".join(auth), encoding="utf-8")
               Path("/tmp/seed-os.sql").write_text("\n".join(os_sql), encoding="utf-8")
           except Exception:
@@ -285,10 +259,9 @@ jobs:
             echo '| GERENTE | demo.gerente@example.invalid |'
             echo '| CLIENTE | demo.cliente@example.invalid |'
             echo
-            echo "- Gerente pode criar filial: sim"
-            echo "- Filial com permissoes de Atendente e Gerente: ${FILIAL_ID:-nenhuma}"
-            echo "- Cliente vinculado: ${CLIENTE_ID:-nenhum}"
-            echo "- OS atribuida ao Mecanico: ${OS_ID:-nenhuma}"
+            echo "- Filial Centro (demo), cliente e veiculo ja cadastrados e vinculados"
+            echo "- Atendente e Gerente com permissoes nessa filial; Gerente pode criar filiais"
+            echo "- Cliente vinculado ao cliente demo; Mecanico atribuido automaticamente a cada OS nova"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Limpar Job e Secret temporarios
