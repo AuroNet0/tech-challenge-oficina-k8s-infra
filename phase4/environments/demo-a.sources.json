@@ -1,6 +1,0 @@
-{
-  "auth": {"repository": "AuroNet0/tech-challenge-oficina-auth", "revision": "6177535915d7f37bf42496e0c423b6af523bbfef", "required_checks": ["verify"]},
-  "os": {"repository": "AuroNet0/tech-challenge-oficina-os-service", "revision": "2aea68cf404541d59847e360914c82ac9bfc7730", "required_checks": ["verify"]},
-  "execution": {"repository": "AuroNet0/tech-challenge-oficina-execution-service", "revision": "c873ff47b36765d7b2942953de3e15d3bbf075de", "required_checks": ["verify"]},
-  "billing": {"repository": "AuroNet0/tech-challenge-oficina-billing-service", "revision": "412029ea97a75a6884216150b5c71fae84389df1", "required_checks": ["verify"]}
-}
