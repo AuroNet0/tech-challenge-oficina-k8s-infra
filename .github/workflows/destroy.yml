@@ -1,4 +1,4 @@
-name: Destroy (temporary)
+name: Destroy
 
 on:
   workflow_dispatch:
