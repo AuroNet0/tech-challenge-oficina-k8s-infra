@@ -7,8 +7,18 @@ on:
         description: ARN do segredo de smoke (a senha dele e reutilizada para os usuarios de demonstracao)
         required: true
         type: string
+      filial_id:
+        description: UUID da filial criada (vazio concede so o necessario para criar filial)
+        required: false
+        type: string
+        default: ''
       cliente_id:
-        description: UUID do cliente criado no os-service a vincular ao usuario CLIENTE (vazio cria o usuario sem vinculo)
+        description: UUID do cliente criado a vincular ao usuario CLIENTE (vazio nao vincula)
+        required: false
+        type: string
+        default: ''
+      os_id:
+        description: UUID da OS aberta para atribuir ao mecanico (vazio nao atribui)
         required: false
         type: string
         default: ''
@@ -35,7 +45,9 @@ jobs:
       AWS_REGION: us-east-1
       AWS_PAGER: ''
       SMOKE_SECRET_ARN: ${{ inputs.smoke_secret_arn }}
+      FILIAL_ID: ${{ inputs.filial_id }}
       CLIENTE_ID: ${{ inputs.cliente_id }}
+      OS_ID: ${{ inputs.os_id }}
       KUBECONFIG: /tmp/seed-kubeconfig
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +72,16 @@ jobs:
       - name: Validar entradas
         run: |
           set -Eeuo pipefail
-          if [ -n "$CLIENTE_ID" ] && ! [[ "$CLIENTE_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
-            echo "::error::cliente_id nao e um UUID valido."
+          uuid_pattern='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          for name in FILIAL_ID CLIENTE_ID OS_ID; do
+            value="${!name}"
+            if [ -n "$value" ] && ! [[ "$value" =~ $uuid_pattern ]]; then
+              echo "::error::${name} nao e um UUID valido."
+              exit 1
+            fi
+          done
+          if [ -n "$OS_ID" ] && [ -z "$FILIAL_ID" ]; then
+            echo "::error::os_id exige filial_id."
             exit 1
           fi
 
@@ -107,16 +127,18 @@ jobs:
       - name: Conferir pre-requisitos do cluster
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::Falha nos pre-requisitos; confira EKS, Secret auth-postgres e ConfigMap rds-ca."' ERR
+          trap 'echo "::error::Falha nos pre-requisitos; confira EKS, Secrets auth-postgres e os-postgres e ConfigMap rds-ca."' ERR
           cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
           namespace=$(jq -er '.name_prefix' /tmp/infra_contract.json)
           aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION"
           kubectl get secret auth-postgres -n "$namespace" -o json --request-timeout=30s \
             | jq -e '.data | (.username | type == "string" and length > 0) and (.password | type == "string" and length > 0)' > /dev/null
+          kubectl get secret os-postgres -n "$namespace" -o json --request-timeout=30s \
+            | jq -e '.data | (.username | type == "string" and length > 0) and (.password | type == "string" and length > 0)' > /dev/null
           kubectl get configmap rds-ca -n "$namespace" -o json --request-timeout=30s \
             | jq -e '.data["ca.pem"] | type == "string" and length > 0' > /dev/null
 
-      - name: Gerar SQL dos usuarios
+      - name: Gerar SQL dos usuarios e permissoes
         run: |
           set -Eeuo pipefail
           trap 'echo "::error::Falha ao gerar SQL; detalhes omitidos para proteger senha e hash."' ERR
@@ -133,36 +155,81 @@ jobs:
               infra = json.loads(Path("/tmp/infra_contract.json").read_text())
               credentials = json.loads(Path("/tmp/credentials.json").read_text())
               prefix = infra["name_prefix"]
-              cliente_id = os.environ.get("CLIENTE_ID", "").strip()
-              if cliente_id:
-                  cliente_id = str(uuid.UUID(cliente_id))
+
+              def optional_uuid(name):
+                  value = os.environ.get(name, "").strip()
+                  return str(uuid.UUID(value)) if value else ""
+
+              filial_id = optional_uuid("FILIAL_ID")
+              cliente_id = optional_uuid("CLIENTE_ID")
+              os_id = optional_uuid("OS_ID")
 
               def literal(value):
                   return "'" + str(value).replace("'", "''") + "'"
 
-              users = [
-                  ("demo.mecanico@example.invalid", "Demo FIAP Mecanico", "MECANICO"),
-                  ("demo.gerente@example.invalid", "Demo FIAP Gerente", "GERENTE"),
-                  ("demo.cliente@example.invalid", "Demo FIAP Cliente", "CLIENTE"),
-              ]
-              statements = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-users',0));"]
-              for email, nome, papel in users:
-                  user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + email))
+              def user_uuid(email):
+                  return str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + email))
+
+              smoke_id = user_uuid(credentials["email"])
+              users = {
+                  "mecanico": ("demo.mecanico@example.invalid", "Demo FIAP Mecanico", "MECANICO"),
+                  "gerente": ("demo.gerente@example.invalid", "Demo FIAP Gerente", "GERENTE"),
+                  "cliente": ("demo.cliente@example.invalid", "Demo FIAP Cliente", "CLIENTE"),
+              }
+              ids = {key: user_uuid(value[0]) for key, value in users.items()}
+              actor = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/seed-grant-actor"))
+
+              auth = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-users',0));"]
+              for key, (email, nome, papel) in users.items():
                   password_hash = Argon2id(salt=os.urandom(16), length=32, iterations=2,
                                            lanes=1, memory_cost=19456).derive_phc_encoded(credentials["password"].encode())
-                  statements.append("INSERT INTO usuarios(id,email,nome,password_hash,ativo,criado_em,atualizado_em) VALUES ("
-                                    + ",".join(map(literal, (user_id, email, nome, password_hash)))
-                                    + ",true,now(),now()) ON CONFLICT DO NOTHING;")
-                  statements.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM usuarios WHERE id=" + literal(user_id)
-                                    + " AND email=" + literal(email)
-                                    + " AND nome LIKE 'Demo FIAP %') THEN RAISE EXCEPTION 'DEMO_IDENTITY_OWNERSHIP_REJECTED'; END IF; END $$;")
-                  statements.append("INSERT INTO usuario_papeis(usuario_id,papel) VALUES (" + literal(user_id)
-                                    + "," + literal(papel) + ") ON CONFLICT DO NOTHING;")
-                  if papel == "CLIENTE" and cliente_id:
-                      statements.append("INSERT INTO usuario_clientes(usuario_id,papel,cliente_id,criado_em) VALUES ("
-                                        + literal(user_id) + ",'CLIENTE'," + literal(cliente_id)
-                                        + ",now()) ON CONFLICT DO NOTHING;")
-              Path("/tmp/seed-users.sql").write_text("\n".join(statements + ["COMMIT;"]), encoding="utf-8")
+                  auth.append("INSERT INTO usuarios(id,email,nome,password_hash,ativo,criado_em,atualizado_em) VALUES ("
+                              + ",".join(map(literal, (ids[key], email, nome, password_hash)))
+                              + ",true,now(),now()) ON CONFLICT DO NOTHING;")
+                  auth.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM usuarios WHERE id=" + literal(ids[key])
+                              + " AND email=" + literal(email)
+                              + " AND nome LIKE 'Demo FIAP %') THEN RAISE EXCEPTION 'DEMO_IDENTITY_OWNERSHIP_REJECTED'; END IF; END $$;")
+                  auth.append("INSERT INTO usuario_papeis(usuario_id,papel) VALUES (" + literal(ids[key])
+                              + "," + literal(papel) + ") ON CONFLICT DO NOTHING;")
+                  if key == "cliente" and cliente_id:
+                      auth.append("INSERT INTO usuario_clientes(usuario_id,papel,cliente_id,criado_em) VALUES ("
+                                  + literal(ids[key]) + ",'CLIENTE'," + literal(cliente_id)
+                                  + ",now()) ON CONFLICT DO NOTHING;")
+              auth.append("COMMIT;")
+
+              def operational(usuario, filial, capability):
+                  return ("INSERT INTO operational_grants(id,usuario_id,filial_id,capability,concedido_por,concedido_em) VALUES ("
+                          + ",".join(map(literal, (uuid.uuid4(), usuario, filial, capability, actor)))
+                          + ",now()) ON CONFLICT DO NOTHING;")
+
+              def administrative(usuario, capability, filial):
+                  return ("INSERT INTO administrative_grants(id,usuario_id,capability,filial_id,concedido_por,concedido_em) VALUES ("
+                          + literal(uuid.uuid4()) + "," + literal(usuario) + "," + literal(capability) + ","
+                          + (literal(filial) if filial else "NULL") + "," + literal(actor) + ",now()) ON CONFLICT DO NOTHING;")
+
+              os_sql = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-grants',0));",
+                        administrative(ids["gerente"], "BRANCH_CREATE", "")]
+              if filial_id:
+                  os_sql.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM filiais WHERE id=" + literal(filial_id)
+                                + ") THEN RAISE EXCEPTION 'FILIAL_NOT_FOUND'; END IF; END $$;")
+                  for capability in ("OS_READ", "OS_OPEN", "CLIENT_READ", "CLIENT_CREATE", "VEHICLE_READ",
+                                     "VEHICLE_CREATE", "BRANCH_READ"):
+                      os_sql.append(operational(smoke_id, filial_id, capability))
+                  for capability in ("OS_READ", "BRANCH_READ"):
+                      os_sql.append(operational(ids["gerente"], filial_id, capability))
+                  os_sql.append(administrative(ids["gerente"], "SAGA_INSPECT", filial_id))
+              if os_id:
+                  os_sql.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM ordens_servico WHERE id=" + literal(os_id)
+                                + ") THEN RAISE EXCEPTION 'OS_NOT_FOUND'; END IF; END $$;")
+                  for capability in ("OPERATIONAL_READ", "VEHICLE_OPERATIONAL_READ", "DIAGNOSTIC_READ",
+                                     "DIAGNOSTIC_WRITE", "DIAGNOSTIC_COMPLETE", "REPAIR_READ", "REPAIR_WRITE",
+                                     "REPAIR_COMPLETE", "HISTORY_READ"):
+                      os_sql.append("INSERT INTO mechanic_assignments(id,usuario_id,os_id,capability,concedido_por,concedido_em) VALUES ("
+                                    + ",".join(map(literal, (uuid.uuid4(), ids["mecanico"], os_id, capability, actor)))
+                                    + ",now()) ON CONFLICT DO NOTHING;")
+              os_sql.append("COMMIT;")
+              Path("/tmp/seed-auth.sql").write_text("\n".join(auth), encoding="utf-8")
+              Path("/tmp/seed-os.sql").write_text("\n".join(os_sql), encoding="utf-8")
           except Exception:
               print("::error::Falha ao gerar SQL; detalhes omitidos para proteger senha e hash.")
               raise SystemExit(1)
@@ -171,26 +238,29 @@ jobs:
       - name: Executar seed via Job psql
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::Falha no Job de seed; confira o RDS e as permissoes do auth-postgres."' ERR
+          trap 'echo "::error::Falha no Job de seed; confira o RDS, as permissoes dos Secrets auth-postgres e os-postgres e se filial/OS informadas existem."' ERR
           umask 077
           namespace=$(jq -er '.name_prefix' /tmp/infra_contract.json)
           kubectl create secret generic demo-users-sql -n "$namespace" \
-            --from-file=seed.sql=/tmp/seed-users.sql --dry-run=client -o json | \
+            --from-file=auth.sql=/tmp/seed-auth.sql --from-file=os.sql=/tmp/seed-os.sql \
+            --dry-run=client -o json | \
             jq '.metadata.labels = {"oficina/managed-by": "actions-seed-users"}' | \
             kubectl apply -f - > /dev/null
-          sql_digest=$(sha256sum /tmp/seed-users.sql)
+          sql_digest=$(cat /tmp/seed-auth.sql /tmp/seed-os.sql | sha256sum)
           job_name="demo-users-seed-${sql_digest:0:12}"
           jq --arg namespace "$namespace" --arg name "$job_name" --slurpfile infra /tmp/infra_contract.json '
             .metadata.name = $name | .metadata.namespace = $namespace |
-            .spec.template.spec.containers[0].command =
-              ["sh", "-ec", "psql -Xq --set=ON_ERROR_STOP=1 --file=/demo/seed.sql >/dev/null"] |
+            .spec.template.spec.containers[0].command = ["sh", "-ec", "export PGHOST PGPORT PGSSLMODE PGSSLROOTCERT; PGDATABASE=\"$AUTH_DB\" PGUSER=\"$AUTH_USER\" PGPASSWORD=\"$AUTH_PASSWORD\" psql -Xq --set=ON_ERROR_STOP=1 --file=/demo/auth.sql >/dev/null; PGDATABASE=\"$OS_DB\" PGUSER=\"$OS_USER\" PGPASSWORD=\"$OS_PASSWORD\" psql -Xq --set=ON_ERROR_STOP=1 --file=/demo/os.sql >/dev/null"] |
             .spec.template.spec.containers[0].envFrom = [] |
             .spec.template.spec.containers[0].env = [
               {name: "PGHOST", value: $infra[0].rds.address}, {name: "PGPORT", value: "5432"},
-              {name: "PGDATABASE", value: $infra[0].rds.application_databases.auth.database},
               {name: "PGSSLMODE", value: "verify-full"}, {name: "PGSSLROOTCERT", value: "/rds-ca/ca.pem"},
-              {name: "PGUSER", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "username"}}},
-              {name: "PGPASSWORD", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "password"}}}] |
+              {name: "AUTH_DB", value: $infra[0].rds.application_databases.auth.database},
+              {name: "OS_DB", value: $infra[0].rds.application_databases.os.database},
+              {name: "AUTH_USER", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "username"}}},
+              {name: "AUTH_PASSWORD", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "password"}}},
+              {name: "OS_USER", valueFrom: {secretKeyRef: {name: "os-postgres", key: "username"}}},
+              {name: "OS_PASSWORD", valueFrom: {secretKeyRef: {name: "os-postgres", key: "password"}}}] |
             .spec.template.spec.containers[0].volumeMounts = [
               {name: "rds-ca", mountPath: "/rds-ca", readOnly: true},
               {name: "demo-sql", mountPath: "/demo", readOnly: true}] |
@@ -205,7 +275,7 @@ jobs:
           kubectl get job "$job_name" -n "$namespace" -o json --request-timeout=30s | \
             jq -e '.status.succeeded == 1' > /dev/null
           {
-            echo '### Usuarios de demonstracao'
+            echo '### Usuarios e permissoes de demonstracao'
             echo
             echo 'Senha: a mesma do segredo de smoke.'
             echo
@@ -213,11 +283,12 @@ jobs:
             echo '|---|---|'
             echo '| MECANICO | demo.mecanico@example.invalid |'
             echo '| GERENTE | demo.gerente@example.invalid |'
-            if [ -n "$CLIENTE_ID" ]; then
-              echo "| CLIENTE (cliente ${CLIENTE_ID}) | demo.cliente@example.invalid |"
-            else
-              echo '| CLIENTE (sem vinculo a cliente) | demo.cliente@example.invalid |'
-            fi
+            echo '| CLIENTE | demo.cliente@example.invalid |'
+            echo
+            echo "- Gerente pode criar filial: sim"
+            echo "- Filial com permissoes de Atendente e Gerente: ${FILIAL_ID:-nenhuma}"
+            echo "- Cliente vinculado: ${CLIENTE_ID:-nenhum}"
+            echo "- OS atribuida ao Mecanico: ${OS_ID:-nenhuma}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Limpar Job e Secret temporarios
