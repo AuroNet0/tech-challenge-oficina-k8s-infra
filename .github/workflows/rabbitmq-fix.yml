@@ -1,0 +1,102 @@
+name: RabbitMQ permissions fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_PAGER: ''
+      CLUSTER: tc-oficina-p4-demo-a
+      NAMESPACE: tc-oficina-p4-demo-a
+      VHOST: /oficina
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Configurar kubeconfig
+        run: |
+          set -Eeuo pipefail
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          kubectl get pod rabbitmq-0 -n "$NAMESPACE" --request-timeout=30s
+
+      - name: Corrigir permissao de leitura nas exchanges
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao ajustar permissoes do RabbitMQ; veja a saida acima."' ERR
+          rabbit() { kubectl exec -n "$NAMESPACE" rabbitmq-0 -c rabbitmq -- "$@"; }
+
+          {
+            echo '### Antes'
+            echo '```'
+            rabbit rabbitmqctl -q list_permissions -p "$VHOST"
+            echo '--- bindings'
+            rabbit rabbitmqctl -q list_bindings -p "$VHOST" source_name destination_name routing_key
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          rabbit rabbitmqctl -q list_permissions -p "$VHOST" --formatter json > /tmp/permissions.json
+          jq -c '.[]' /tmp/permissions.json | while read -r row; do
+            user=$(jq -r '.user' <<<"$row")
+            configure=$(jq -r '.configure' <<<"$row")
+            write=$(jq -r '.write' <<<"$row")
+            read_regex=$(jq -r '.read' <<<"$row")
+            if [[ "$read_regex" == *'oficina\.'* ]]; then
+              echo "Usuario ${user}: leitura ja inclui as exchanges; nada a fazer."
+              continue
+            fi
+            inner="${read_regex#^}"
+            inner="${inner%\$}"
+            new_read="^(oficina\\..*|${inner})\$"
+            echo "Usuario ${user}: leitura ${read_regex} -> ${new_read}"
+            rabbit rabbitmqctl -q set_permissions -p "$VHOST" "$user" "$configure" "$write" "$new_read" < /dev/null
+          done
+
+      - name: Reiniciar servicos para recriar os bindings
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao reiniciar os servicos; confira os Deployments."' ERR
+          for deployment in os-service execution-service billing-service; do
+            kubectl rollout restart "deployment/${deployment}" -n "$NAMESPACE"
+          done
+          for deployment in os-service execution-service billing-service; do
+            kubectl rollout status "deployment/${deployment}" -n "$NAMESPACE" --timeout=600s
+          done
+
+      - name: Conferir resultado
+        run: |
+          set -Eeuo pipefail
+          rabbit() { kubectl exec -n "$NAMESPACE" rabbitmq-0 -c rabbitmq -- "$@"; }
+          sleep 20
+          {
+            echo '### Depois'
+            echo '```'
+            rabbit rabbitmqctl -q list_permissions -p "$VHOST"
+            echo '--- bindings'
+            rabbit rabbitmqctl -q list_bindings -p "$VHOST" source_name destination_name routing_key
+            echo '--- filas'
+            rabbit rabbitmqctl -q list_queues -p "$VHOST" name messages consumers
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! rabbit rabbitmqctl -q list_bindings -p "$VHOST" source_name destination_name \
+            | grep -q 'oficina.commands.*execution.diagnostic.start'; then
+            echo "::error::Binding oficina.commands -> execution.diagnostic.start ainda ausente."
+            exit 1
+          fi

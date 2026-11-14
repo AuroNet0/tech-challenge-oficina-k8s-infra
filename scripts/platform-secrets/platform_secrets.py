@@ -195,7 +195,7 @@ def rabbit_definitions(credentials):
         password_hash = base64.b64encode(salt + hashlib.sha256(salt + credential['password'].encode()).digest()).decode()
         users.append({'name': credential['username'], 'password_hash': password_hash, 'hashing_algorithm': 'rabbit_password_hashing_sha256', 'tags': []})
         configure = r'^(oficina\..*|execution\.diagnostic\.start|os\.saga\.events(\.dlq)?)$' if service == 'os' else rf'^(oficina\..*|{service}\..*)$'
-        readable = r'^os\.saga\.events(\.dlq)?$' if service == 'os' else rf'^{service}\..*$'
+        readable = r'^(oficina\..*|os\.saga\.events(\.dlq)?)$' if service == 'os' else rf'^(oficina\..*|{service}\..*)$'
         permissions.append({'user': credential['username'], 'vhost': '/oficina', 'configure': configure, 'write': configure, 'read': readable})
     return {'definitions.json': json.dumps({'users': users, 'vhosts': [{'name': '/oficina'}], 'permissions': permissions}, separators=(',', ':'))}
 
