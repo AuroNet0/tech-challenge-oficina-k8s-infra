@@ -184,6 +184,19 @@ O job `e2e` do [Deploy](.github/workflows/deploy.yml) lê as credenciais de smok
 
 O job registra status esperados/obtidos no resumo, mascara senha/token e limpa o Secret SQL temporário com `always()`. Esses testes verificam login e restrições de acesso; não demonstram uma execução completa da Saga.
 
+## Fluxo completo no Postman
+
+Arquivo disponível: [coleção Oficina — Fluxo completo da OS (demo)](docs/postman/full-cycle-collection.json).
+
+A coleção realiza os logins dos quatro perfis: Atendente, Mecânico, Cliente e Gerente. O fluxo principal cria filial, cliente e veículo e abre a OS pelo os-service; executa o diagnóstico pelo Execution, aprova o orçamento no Billing, realiza o reparo e o checkout do pagamento e consulta o histórico da OS e o estado final da Saga. A pasta `Compensação (orçamento rejeitado)` rejeita o orçamento e verifica Saga `COMPENSATED` e OS `CANCELADA`.
+
+1. Importe a coleção disponível. A importação dos dois arquivos depende da disponibilização do arquivo de ambiente; enquanto ele estiver ausente, crie o ambiente manualmente.
+2. Selecione o ambiente `Oficina - AWS` e preencha `baseUrl` com a URL do API Gateway exibida pelo Deploy e as credenciais dos quatro perfis: `emailAtendente`/`senhaAtendente`, `emailMecanico`/`senhaMecanico`, `emailCliente`/`senhaCliente` e `emailGerente`/`senhaGerente`.
+3. Execute a coleção no Collection Runner, na ordem apresentada, começando pelos logins do fluxo principal.
+4. Observe as consultas que aguardam o processamento assíncrono via RabbitMQ: diagnóstico, orçamento, reparo e pagamento repetem a consulta até oito vezes adicionais quando o recurso ainda não foi encontrado.
+
+As coleções por serviço, em `docs/postman` de cada repositório de serviço, cobrem cada API individualmente; a coleção disponível neste repositório usa variáveis, sem valores de credenciais ou tokens versionados.
+
 ## 6. Limitações conhecidas
 
 - **Role de automação ampla no cluster:** o Deploy passa `AWS_ROLE_ARN` como administrador do EKS, e [eks.tf](phase4/stacks/infra/eks.tf) associa `AmazonEKSClusterAdminPolicy` no escopo do cluster. O conjunto completo das permissões IAM dessa role é **não identificado**.
@@ -194,6 +207,7 @@ O job registra status esperados/obtidos no resumo, mascara senha/token e limpa o
 
 | Pasta ou arquivo | Conteúdo verificado |
 | --- | --- |
+| `docs/postman` | Coleção Postman do fluxo completo e ambiente |
 | [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | Provisionamento, build, publicação e E2E. |
 | [.github/workflows/destroy.yml](.github/workflows/destroy.yml) | Remoção em quatro fases e auditoria residual. |
 | [.github/workflows/images.yml](.github/workflows/images.yml) | Cabeçalho `Images (temporary)`; seu run bem-sucedido é aceito pelo Destroy como origem de `images.json`. |
