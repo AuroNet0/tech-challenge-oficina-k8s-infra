@@ -207,13 +207,3 @@ O job registra status esperados/obtidos no resumo, mascara senha/token e limpa o
 
 Cabeçalhos atuais: `Deploy`, `Images (temporary)` e `Destroy (temporary)`.
 
-## 8. O que não pôde ser confirmado
-
-- Detalhamento da Saga orquestrada pelo os-service, compensações e existência da seção/âncora Saga no README externo.
-- Pipelines próprios e configuração de CD/OIDC nos quatro repositórios de serviços.
-- Trust policy efetiva e permissões IAM completas da role de automação; o uso de OIDC e a concessão administrativa no EKS são verificáveis aqui.
-- Motivação histórica da divisão dos serviços e escolha dos bancos, além das associações declaradas.
-- Formato interno de `auth-signing`, custo de US$ 9/dia e duração de 45–60 minutos após a infra.
-- Disponibilidade atual dos recursos e resultados de execuções reais dos workflows.
-
-Todos os links relativos deste README foram validados contra arquivos existentes no repositório. Os links externos identificam repositórios citados nas fontes locais; seu conteúdo remoto não foi consultado.
