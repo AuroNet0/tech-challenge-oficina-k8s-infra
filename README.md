@@ -170,6 +170,14 @@ São preservados o bucket de artefatos, o bucket de state, `auth-signing` e os d
 
 **Custo aproximado de US$ 9/dia com o ambiente de pé: não identificado** nas fontes permitidas. Execute Destroy após o uso; os recursos têm ciclo de vida efêmero declarado no [módulo de ambiente](phase4/modules/environment/main.tf).
 
+### Monitoramento (New Relic)
+
+Após a conclusão do Deploy, execute o workflow [Monitoring (New Relic)](.github/workflows/monitoring.yml) com `action = up`. Ele cria o namespace `tc-oficina-p4-demo-a-observability` e o Secret Kubernetes `newrelic-license` a partir do secret de repositório `NEW_RELIC_LICENSE_KEY`, e instala o chart `nri-bundle` para coletar métricas dos nodes e pods, logs e eventos do Kubernetes.
+
+O secret `NEW_RELIC_LICENSE_KEY` do repositório deve conter uma chave do tipo **Ingest - License** do New Relic; seu valor nunca é versionado.
+
+Execute o mesmo workflow com `action = down` para remover o monitoramento e o namespace. O [Destroy](.github/workflows/destroy.yml) também remove esse namespace durante a limpeza do cluster.
+
 ## 5. Smoke test — job E2E do Deploy
 
 O job `e2e` do [Deploy](.github/workflows/deploy.yml) lê as credenciais de smoke, semeia um usuário ATENDENTE no Auth por Job `psql` e verifica:
@@ -190,7 +198,7 @@ Arquivo disponível: [coleção Oficina — Fluxo completo da OS (demo)](docs/po
 
 A coleção realiza os logins dos quatro perfis: Atendente, Mecânico, Cliente e Gerente. O fluxo principal cria filial, cliente e veículo e abre a OS pelo os-service; executa o diagnóstico pelo Execution, aprova o orçamento no Billing, realiza o reparo e o checkout do pagamento e consulta o histórico da OS e o estado final da Saga. A pasta `Compensação (orçamento rejeitado)` rejeita o orçamento e verifica Saga `COMPENSATED` e OS `CANCELADA`.
 
-1. Importe a coleção disponível. A importação dos dois arquivos depende da disponibilização do arquivo de ambiente; enquanto ele estiver ausente, crie o ambiente manualmente.
+1. Importe a coleção e o ambiente `Oficina - AWS` (arquivo `docs/postman/enviroment.json` do repositório [tech-challenge-oficina-auth](https://github.com/AuroNet0/tech-challenge-oficina-auth/blob/main/docs/postman/enviroment.json)).
 2. Selecione o ambiente `Oficina - AWS` e preencha `baseUrl` com a URL do API Gateway exibida pelo Deploy e as credenciais dos quatro perfis: `emailAtendente`/`senhaAtendente`, `emailMecanico`/`senhaMecanico`, `emailCliente`/`senhaCliente` e `emailGerente`/`senhaGerente`.
 3. Execute a coleção no Collection Runner, na ordem apresentada, começando pelos logins do fluxo principal.
 4. Observe as consultas que aguardam o processamento assíncrono via RabbitMQ: diagnóstico, orçamento, reparo e pagamento repetem a consulta até oito vezes adicionais quando o recurso ainda não foi encontrado.
@@ -210,7 +218,8 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 | `docs/postman` | Coleção Postman do fluxo completo e ambiente |
 | [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | Provisionamento, build, publicação e E2E. |
 | [.github/workflows/destroy.yml](.github/workflows/destroy.yml) | Remoção em quatro fases e auditoria residual. |
-| [.github/workflows/images.yml](.github/workflows/images.yml) | Cabeçalho `Images (temporary)`; seu run bem-sucedido é aceito pelo Destroy como origem de `images.json`. |
+| [.github/workflows/images.yml](.github/workflows/images.yml) | Workflow `Images`; seu run bem-sucedido é aceito pelo Destroy como origem de `images.json`. |
+| [.github/workflows/monitoring.yml](.github/workflows/monitoring.yml) | Workflow `Monitoring (New Relic)`: instala (`up`) ou remove (`down`) o monitoramento do cluster com o chart nri-bundle, usando o secret NEW_RELIC_LICENSE_KEY do repositório. |
 | [phase4/stacks/infra](phase4/stacks/infra/main.tf) | Infraestrutura AWS e contratos. |
 | [phase4/stacks/platform](phase4/stacks/platform/main.tf) | Suporte EKS e contratos/manifests Kubernetes. |
 | [phase4/stacks/edge](phase4/stacks/edge/main.tf) | Entrada pública, Auth Lambda, integrações privadas e Ingress. |
@@ -219,5 +228,5 @@ As coleções por serviço, em `docs/postman` de cada repositório de serviço, 
 | [phase4/environments/catalog.json](phase4/environments/catalog.json) | Conta, região, backend e chaves dos states. |
 | [scripts/platform-secrets](scripts/platform-secrets/deliver.py) | Entrega, validação e remoção de segredos efêmeros. |
 
-Cabeçalhos atuais: `Deploy`, `Images (temporary)` e `Destroy (temporary)`.
+Workflows atuais: `Deploy`, `Destroy`, `Images` e `Monitoring (New Relic)`.
 
