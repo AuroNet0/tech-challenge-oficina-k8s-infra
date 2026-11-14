@@ -1,0 +1,1932 @@
+{
+  "info": {
+    "_postman_id": "389db2a4-22ed-4a57-aee5-75b1096bc1f0",
+    "name": "Oficina - Fluxo completo da OS (demo)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Fluxo Principal",
+      "item": [
+        {
+          "name": "1.1 Login Atendente",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem accessToken\", function () { pm.expect(pm.response.json().accessToken).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"tokenAtendente\", pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"{{emailAtendente}}\",\"senha\":\"{{senhaAtendente}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Passo 1: Autentica o Atendente e salva o token."
+          },
+          "response": []
+        },
+        {
+          "name": "1.2 Login Mecânico",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem accessToken\", function () { pm.expect(pm.response.json().accessToken).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"tokenMecanico\", pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"{{emailMecanico}}\",\"senha\":\"{{senhaMecanico}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Passo 1: Autentica o Mecânico e salva o token."
+          },
+          "response": []
+        },
+        {
+          "name": "1.3 Login Cliente",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem accessToken\", function () { pm.expect(pm.response.json().accessToken).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"tokenCliente\", pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"{{emailCliente}}\",\"senha\":\"{{senhaCliente}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Passo 1: Autentica o Cliente e salva o token."
+          },
+          "response": []
+        },
+        {
+          "name": "1.4 Login Gerente",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem accessToken\", function () { pm.expect(pm.response.json().accessToken).to.be.a(\"string\"); });",
+                  "pm.environment.set(\"tokenGerente\", pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"{{emailGerente}}\",\"senha\":\"{{senhaGerente}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Passo 1: Autentica o Gerente e salva o token."
+          },
+          "response": []
+        },
+        {
+          "name": "2.1 Gerente cria Filial",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
+                  "pm.environment.set(\"filialId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set(\"filialCodigo\",\"F\"+(100000+Math.floor(Math.random()*900000)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"nome\":\"Filial Centro\",\"codigo\":\"{{filialCodigo}}\",\"cidade\":\"São Paulo\",\"uf\":\"SP\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/filiais",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "filiais"
+              ]
+            },
+            "description": "Passo 2: Gerente cria a filial para o fluxo."
+          },
+          "response": []
+        },
+        {
+          "name": "2.2 Atendente cria Cliente",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
+                  "pm.environment.set(\"clienteId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var d=function(n){return Math.floor(Math.random()*n)};var n=[];for(var i=0;i<9;i++){n.push(d(10));}",
+                  "var dv=function(a){var s=0;for(var i=0;i<a.length;i++){s+=a[i]*(a.length+1-i);}var r=(s*10)%11;return r===10?0:r;};",
+                  "n.push(dv(n));n.push(dv(n));pm.variables.set(\"cpfTeste\",n.join(\"\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"nome\":\"Cliente Teste\",\"cpfCnpj\":\"{{cpfTeste}}\",\"email\":\"cliente@example.invalid\",\"telefone\":\"11999990000\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes?filialId={{filialId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes"
+              ],
+              "query": [
+                {
+                  "key": "filialId",
+                  "value": "{{filialId}}"
+                }
+              ]
+            },
+            "description": "Passo 2: Atendente cadastra o cliente."
+          },
+          "response": []
+        },
+        {
+          "name": "2.3 Atendente cria Veículo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
+                  "pm.environment.set(\"veiculoId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var L=\"ABCDEFGHJKLMNPRSTUVWXYZ\";var r=function(s){return s.charAt(Math.floor(Math.random()*s.length));};",
+                  "pm.variables.set(\"placaTeste\",r(L)+r(L)+r(L)+r(\"0123456789\")+r(L)+r(\"0123456789\")+r(\"0123456789\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clienteId\":\"{{clienteId}}\",\"placa\":\"{{placaTeste}}\",\"marca\":\"Fiat\",\"modelo\":\"Uno\",\"ano\":2018}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/veiculos?filialId={{filialId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "veiculos"
+              ],
+              "query": [
+                {
+                  "key": "filialId",
+                  "value": "{{filialId}}"
+                }
+              ]
+            },
+            "description": "Passo 2: Atendente cadastra o veículo do cliente."
+          },
+          "response": []
+        },
+        {
+          "name": "2.4 Atendente abre OS",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
+                  "pm.environment.set(\"osId\", pm.response.json().id);",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clienteId\":\"{{clienteId}}\",\"veiculoId\":\"{{veiculoId}}\",\"filialId\":\"{{filialId}}\",\"observacoes\":\"Barulho no motor\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico"
+              ]
+            },
+            "description": "Passo 2: Atendente abre a Ordem de Serviço."
+          },
+          "response": []
+        },
+        {
+          "name": "3.1 Mecânico consulta Diagnóstico por osId",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"diagnosticoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Diagnóstico encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"3.1 Mecânico consulta Diagnóstico por osId\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Diagnóstico encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Passo 3: Mecânico busca o diagnóstico criado pela Saga."
+          },
+          "response": []
+        },
+        {
+          "name": "3.2 Mecânico inicia Diagnóstico",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/inicio",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "inicio"
+              ]
+            },
+            "description": "Passo 3: Mecânico inicia o diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "3.3 Mecânico adiciona item ao Diagnóstico",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"itemId\":\"ITEM-001\",\"descricao\":\"Troca de óleo\",\"tipo\":\"SERVICO\",\"quantidade\":\"1\",\"unidadePreco\":\"UNIDADE\",\"precoPrevisto\":\"150.00\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/itens",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "itens"
+              ]
+            },
+            "description": "Passo 3: Mecânico adiciona item ao diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "3.4 Mecânico conclui Diagnóstico",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/conclusao",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "conclusao"
+              ]
+            },
+            "description": "Passo 3: Mecânico conclui o diagnóstico (Saga avança para orçamento)."
+          },
+          "response": []
+        },
+        {
+          "name": "4.1 Cliente consulta Orçamento por osId",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"orcamentoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Orçamento encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"4.1 Cliente consulta Orçamento por osId\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Orçamento encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orcamentos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orcamentos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Passo 4: Cliente busca o orçamento gerado pela Saga."
+          },
+          "response": []
+        },
+        {
+          "name": "4.2 Cliente aprova Orçamento",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"responsavelId\":\"cliente-teste\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orcamentos/{{orcamentoId}}/aprovar",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orcamentos",
+                "{{orcamentoId}}",
+                "aprovar"
+              ]
+            },
+            "description": "Passo 4: Cliente aprova o orçamento (Saga avança para reparo)."
+          },
+          "response": []
+        },
+        {
+          "name": "5.1 Mecânico consulta Reparo por osId",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"reparoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Reparo encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"5.1 Mecânico consulta Reparo por osId\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Reparo encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reparos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reparos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Passo 5: Mecânico busca o reparo criado pela Saga após aprovação."
+          },
+          "response": []
+        },
+        {
+          "name": "5.2 Mecânico inicia Reparo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reparos/{{reparoId}}/inicio",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reparos",
+                "{{reparoId}}",
+                "inicio"
+              ]
+            },
+            "description": "Passo 5: Mecânico inicia o reparo."
+          },
+          "response": []
+        },
+        {
+          "name": "5.3 Mecânico conclui Reparo",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reparos/{{reparoId}}/conclusao",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reparos",
+                "{{reparoId}}",
+                "conclusao"
+              ]
+            },
+            "description": "Passo 5: Mecânico conclui o reparo (Saga avança para pagamento)."
+          },
+          "response": []
+        },
+        {
+          "name": "6.1 Cliente consulta Pagamento por osId",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"pagamentoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Pagamento encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"6.1 Cliente consulta Pagamento por osId\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Pagamento encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pagamentos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "pagamentos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Passo 6: Cliente busca o pagamento gerado pela Saga."
+          },
+          "response": []
+        },
+        {
+          "name": "6.2 Cliente faz Checkout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pagamentos/{{pagamentoId}}/checkout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "pagamentos",
+                "{{pagamentoId}}",
+                "checkout"
+              ]
+            },
+            "description": "Passo 6: Cliente inicia o checkout via Mercado Pago e recebe o link."
+          },
+          "response": []
+        },
+        {
+          "name": "7.1 Gerente consulta OS",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico/{{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico",
+                "{{osId}}"
+              ]
+            },
+            "description": "Passo 7: Gerente verifica o estado final da OS."
+          },
+          "response": []
+        },
+        {
+          "name": "7.2 Gerente consulta Histórico da OS",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico/{{osId}}/historico",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico",
+                "{{osId}}",
+                "historico"
+              ]
+            },
+            "description": "Passo 7: Gerente verifica o histórico completo da OS."
+          },
+          "response": []
+        },
+        {
+          "name": "7.3 Gerente consulta estado da Saga",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Saga em andamento ou concluída\",function(){pm.expect([\"WAITING_PAYMENT\",\"COMPLETED\"]).to.include(pm.response.json().status);});"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico/{{osId}}/saga",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico",
+                "{{osId}}",
+                "saga"
+              ]
+            },
+            "description": "Passo 7: Gerente verifica o estado final da Saga (status, etapa, erro)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Compensação (orçamento rejeitado)",
+      "item": [
+        {
+          "name": "C.1 Gerente cria Filial (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"filialId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set(\"filialCodigo\",\"F\"+(100000+Math.floor(Math.random()*900000)));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"nome\":\"Filial Centro\",\"codigo\":\"{{filialCodigo}}\",\"cidade\":\"São Paulo\",\"uf\":\"SP\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/filiais",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "filiais"
+              ]
+            },
+            "description": "Compensação Passo 2: Gerente cria filial para o fluxo de compensação."
+          },
+          "response": []
+        },
+        {
+          "name": "C.2 Atendente cria Cliente (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"clienteId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var d=function(n){return Math.floor(Math.random()*n)};var n=[];for(var i=0;i<9;i++){n.push(d(10));}",
+                  "var dv=function(a){var s=0;for(var i=0;i<a.length;i++){s+=a[i]*(a.length+1-i);}var r=(s*10)%11;return r===10?0:r;};",
+                  "n.push(dv(n));n.push(dv(n));pm.variables.set(\"cpfTeste\",n.join(\"\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"nome\":\"Cliente Teste\",\"cpfCnpj\":\"{{cpfTeste}}\",\"email\":\"cliente@example.invalid\",\"telefone\":\"11999990000\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes?filialId={{filialId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes"
+              ],
+              "query": [
+                {
+                  "key": "filialId",
+                  "value": "{{filialId}}"
+                }
+              ]
+            },
+            "description": "Compensação Passo 2: Atendente cadastra cliente."
+          },
+          "response": []
+        },
+        {
+          "name": "C.3 Atendente cria Veículo (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"veiculoId\", pm.response.json().id);"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var L=\"ABCDEFGHJKLMNPRSTUVWXYZ\";var r=function(s){return s.charAt(Math.floor(Math.random()*s.length));};",
+                  "pm.variables.set(\"placaTeste\",r(L)+r(L)+r(L)+r(\"0123456789\")+r(L)+r(\"0123456789\")+r(\"0123456789\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clienteId\":\"{{clienteId}}\",\"placa\":\"{{placaTeste}}\",\"marca\":\"Volkswagen\",\"modelo\":\"Gol\",\"ano\":2020}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/veiculos?filialId={{filialId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "veiculos"
+              ],
+              "query": [
+                {
+                  "key": "filialId",
+                  "value": "{{filialId}}"
+                }
+              ]
+            },
+            "description": "Compensação Passo 2: Atendente cadastra veículo."
+          },
+          "response": []
+        },
+        {
+          "name": "C.4 Atendente abre OS (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"osId\", pm.response.json().id);",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenAtendente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"clienteId\":\"{{clienteId}}\",\"veiculoId\":\"{{veiculoId}}\",\"filialId\":\"{{filialId}}\",\"observacoes\":\"Teste de compensação - rejeição de orçamento\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico"
+              ]
+            },
+            "description": "Compensação Passo 2: Atendente abre OS para o fluxo de compensação."
+          },
+          "response": []
+        },
+        {
+          "name": "C.5 Mecânico consulta Diagnóstico (compensação)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"diagnosticoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Diagnóstico encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"C.5 Mecânico consulta Diagnóstico (compensação)\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Diagnóstico encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Compensação Passo 3: Mecânico busca o diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "C.6 Mecânico inicia Diagnóstico (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/inicio",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "inicio"
+              ]
+            },
+            "description": "Compensação Passo 3: Mecânico inicia o diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "C.7 Mecânico adiciona item ao Diagnóstico (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"itemId\":\"ITEM-001\",\"descricao\":\"Troca de óleo\",\"tipo\":\"SERVICO\",\"quantidade\":\"1\",\"unidadePreco\":\"UNIDADE\",\"precoPrevisto\":\"150.00\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/itens",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "itens"
+              ]
+            },
+            "description": "Compensação Passo 3: Mecânico adiciona item ao diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "C.8 Mecânico conclui Diagnóstico (compensação)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenMecanico}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/diagnosticos/{{diagnosticoId}}/conclusao",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "diagnosticos",
+                "{{diagnosticoId}}",
+                "conclusao"
+              ]
+            },
+            "description": "Compensação Passo 3: Mecânico conclui o diagnóstico."
+          },
+          "response": []
+        },
+        {
+          "name": "C.9 Cliente consulta Orçamento (compensação)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var ok=pm.response.code===200,item=null;",
+                  "if(ok){var json=pm.response.json();item=Array.isArray(json)?json[0]:(json&&json.content?json.content[0]:json);}",
+                  "if(item&&item.id){pm.environment.set(\"orcamentoId\",item.id);pm.environment.set(\"_retryCount\",0);",
+                  "pm.test(\"Status 200\",function(){pm.response.to.have.status(200);});",
+                  "pm.test(\"Orçamento encontrado\",function(){pm.expect(item.id).to.exist;});}",
+                  "else{var r=parseInt(pm.environment.get(\"_retryCount\")||0);",
+                  "if(r<8){pm.environment.set(\"_retryCount\",r+1);postman.setNextRequest(\"C.9 Cliente consulta Orçamento (compensação)\");}",
+                  "else{pm.environment.set(\"_retryCount\",0);pm.test(\"Orçamento encontrado após tentativas\",function(){throw new Error(\"não encontrado\");});}}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orcamentos?osId={{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orcamentos"
+              ],
+              "query": [
+                {
+                  "key": "osId",
+                  "value": "{{osId}}"
+                }
+              ]
+            },
+            "description": "Compensação Passo 4: Cliente busca o orçamento para rejeitar."
+          },
+          "response": []
+        },
+        {
+          "name": "C.10 Cliente rejeita Orçamento",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.environment.set(\"_retryCount\", 0);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenCliente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"responsavelId\":\"cliente-teste\",\"motivo\":\"Valor acima do esperado\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/orcamentos/{{orcamentoId}}/rejeitar",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "orcamentos",
+                "{{orcamentoId}}",
+                "rejeitar"
+              ]
+            },
+            "description": "Compensação Passo 4: Cliente rejeita o orçamento (Saga inicia compensação)."
+          },
+          "response": []
+        },
+        {
+          "name": "C.11 Gerente consulta estado da Saga (compensação)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Saga COMPENSATED\",function(){pm.expect(pm.response.json().status).to.eql(\"COMPENSATED\");});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico/{{osId}}/saga",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico",
+                "{{osId}}",
+                "saga"
+              ]
+            },
+            "description": "Compensação: Gerente verifica que a Saga está COMPENSATED."
+          },
+          "response": []
+        },
+        {
+          "name": "C.12 Gerente consulta OS cancelada",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"OS CANCELADA\",function(){pm.expect(pm.response.json().status).to.eql(\"CANCELADA\");});"
+                ]
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var _e=Date.now()+3000;while(Date.now()<_e){}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tokenGerente}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-servico/{{osId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-servico",
+                "{{osId}}"
+              ]
+            },
+            "description": "Compensação: Gerente verifica que a OS está cancelada após compensação da Saga."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
