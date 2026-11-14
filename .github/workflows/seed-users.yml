@@ -1,0 +1,231 @@
+name: Seed users
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_secret_arn:
+        description: ARN do segredo de smoke (a senha dele e reutilizada para os usuarios de demonstracao)
+        required: true
+        type: string
+      cliente_id:
+        description: UUID do cliente criado no os-service a vincular ao usuario CLIENTE (vazio cria o usuario sem vinculo)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: phase4-demo-a-mutation
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: 'false'
+      TF_WORKSPACE: default
+      AWS_REGION: us-east-1
+      AWS_PAGER: ''
+      SMOKE_SECRET_ARN: ${{ inputs.smoke_secret_arn }}
+      CLIENTE_ID: ${{ inputs.cliente_id }}
+      KUBECONFIG: /tmp/seed-kubeconfig
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: seed-users-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Validar entradas
+        run: |
+          set -Eeuo pipefail
+          if [ -n "$CLIENTE_ID" ] && ! [[ "$CLIENTE_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::cliente_id nao e um UUID valido."
+            exit 1
+          fi
+
+      - name: Ler outputs da infra e da plataforma
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao ler outputs; confira se o Deploy esta de pe e as permissoes AWS."' ERR
+          umask 077
+          for stack in infra platform; do
+            terraform -chdir="phase4/stacks/${stack}" init -input=false -no-color \
+              -backend-config=bucket=tech-challenge-oficina-terraform-state-b1cfa326 \
+              -backend-config="key=phase4/environments/demo-a/${stack}.tfstate" \
+              -backend-config=region=us-east-1 \
+              -backend-config=encrypt=true \
+              -backend-config=use_lockfile=true > /dev/null
+          done
+          terraform -chdir=phase4/stacks/infra output -json platform_contract > /tmp/infra_contract.json
+          terraform -chdir=phase4/stacks/platform output -json manifests > /tmp/platform-manifests.json
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          jq -e --arg account "$account_id" '.environment_id == "demo-a" and
+            .aws_account_id == $account and .aws_region == "us-east-1" and
+            (.name_prefix | type == "string" and length > 0)' /tmp/infra_contract.json > /dev/null
+          jq -e '.bootstrap | fromjson | .items[0] | select(.kind == "Job")' \
+            /tmp/platform-manifests.json > /tmp/job-base.json
+
+      - name: Ler credenciais de smoke
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao ler smoke_secret_arn; exige email @example.invalid e senha de 12 a 1024 caracteres."' ERR
+          umask 077
+          account_id=$(jq -er '.aws_account_id' /tmp/infra_contract.json)
+          secret_pattern="^arn:aws:secretsmanager:${AWS_REGION}:${account_id}:secret:[A-Za-z0-9/_+=.@!-]+-[A-Za-z0-9]{6}$"
+          [[ "$SMOKE_SECRET_ARN" =~ $secret_pattern ]]
+          aws secretsmanager get-secret-value --secret-id "$SMOKE_SECRET_ARN" \
+            --query SecretString --output text > /tmp/credentials.json
+          jq -e 'type == "object" and
+            (.email | type == "string" and test("^[a-z0-9.+_-]+@example\\.invalid$")) and
+            (.password | type == "string" and length >= 12 and length <= 1024)' \
+            /tmp/credentials.json > /dev/null 2>&1
+          masked_password=$(jq -jr '.password | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' /tmp/credentials.json)
+          printf '::add-mask::%s\n' "$masked_password"
+
+      - name: Conferir pre-requisitos do cluster
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha nos pre-requisitos; confira EKS, Secret auth-postgres e ConfigMap rds-ca."' ERR
+          cluster_name=$(jq -er '.eks.name' /tmp/infra_contract.json)
+          namespace=$(jq -er '.name_prefix' /tmp/infra_contract.json)
+          aws eks update-kubeconfig --name "$cluster_name" --region "$AWS_REGION"
+          kubectl get secret auth-postgres -n "$namespace" -o json --request-timeout=30s \
+            | jq -e '.data | (.username | type == "string" and length > 0) and (.password | type == "string" and length > 0)' > /dev/null
+          kubectl get configmap rds-ca -n "$namespace" -o json --request-timeout=30s \
+            | jq -e '.data["ca.pem"] | type == "string" and length > 0' > /dev/null
+
+      - name: Gerar SQL dos usuarios
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao gerar SQL; detalhes omitidos para proteger senha e hash."' ERR
+          umask 077
+          python -m pip install --disable-pip-version-check cryptography==50.0.1
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import uuid
+          from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+
+          try:
+              infra = json.loads(Path("/tmp/infra_contract.json").read_text())
+              credentials = json.loads(Path("/tmp/credentials.json").read_text())
+              prefix = infra["name_prefix"]
+              cliente_id = os.environ.get("CLIENTE_ID", "").strip()
+              if cliente_id:
+                  cliente_id = str(uuid.UUID(cliente_id))
+
+              def literal(value):
+                  return "'" + str(value).replace("'", "''") + "'"
+
+              users = [
+                  ("demo.mecanico@example.invalid", "Demo FIAP Mecanico", "MECANICO"),
+                  ("demo.gerente@example.invalid", "Demo FIAP Gerente", "GERENTE"),
+                  ("demo.cliente@example.invalid", "Demo FIAP Cliente", "CLIENTE"),
+              ]
+              statements = ["BEGIN;", "SELECT pg_advisory_xact_lock(hashtextextended('oficina-demo-users',0));"]
+              for email, nome, papel in users:
+                  user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, prefix + "/" + email))
+                  password_hash = Argon2id(salt=os.urandom(16), length=32, iterations=2,
+                                           lanes=1, memory_cost=19456).derive_phc_encoded(credentials["password"].encode())
+                  statements.append("INSERT INTO usuarios(id,email,nome,password_hash,ativo,criado_em,atualizado_em) VALUES ("
+                                    + ",".join(map(literal, (user_id, email, nome, password_hash)))
+                                    + ",true,now(),now()) ON CONFLICT DO NOTHING;")
+                  statements.append("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM usuarios WHERE id=" + literal(user_id)
+                                    + " AND email=" + literal(email)
+                                    + " AND nome LIKE 'Demo FIAP %') THEN RAISE EXCEPTION 'DEMO_IDENTITY_OWNERSHIP_REJECTED'; END IF; END $$;")
+                  statements.append("INSERT INTO usuario_papeis(usuario_id,papel) VALUES (" + literal(user_id)
+                                    + "," + literal(papel) + ") ON CONFLICT DO NOTHING;")
+                  if papel == "CLIENTE" and cliente_id:
+                      statements.append("INSERT INTO usuario_clientes(usuario_id,papel,cliente_id,criado_em) VALUES ("
+                                        + literal(user_id) + ",'CLIENTE'," + literal(cliente_id)
+                                        + ",now()) ON CONFLICT DO NOTHING;")
+              Path("/tmp/seed-users.sql").write_text("\n".join(statements + ["COMMIT;"]), encoding="utf-8")
+          except Exception:
+              print("::error::Falha ao gerar SQL; detalhes omitidos para proteger senha e hash.")
+              raise SystemExit(1)
+          PY
+
+      - name: Executar seed via Job psql
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha no Job de seed; confira o RDS e as permissoes do auth-postgres."' ERR
+          umask 077
+          namespace=$(jq -er '.name_prefix' /tmp/infra_contract.json)
+          kubectl create secret generic demo-users-sql -n "$namespace" \
+            --from-file=seed.sql=/tmp/seed-users.sql --dry-run=client -o json | \
+            jq '.metadata.labels = {"oficina/managed-by": "actions-seed-users"}' | \
+            kubectl apply -f - > /dev/null
+          sql_digest=$(sha256sum /tmp/seed-users.sql)
+          job_name="demo-users-seed-${sql_digest:0:12}"
+          jq --arg namespace "$namespace" --arg name "$job_name" --slurpfile infra /tmp/infra_contract.json '
+            .metadata.name = $name | .metadata.namespace = $namespace |
+            .spec.template.spec.containers[0].command =
+              ["sh", "-ec", "psql -Xq --set=ON_ERROR_STOP=1 --file=/demo/seed.sql >/dev/null"] |
+            .spec.template.spec.containers[0].envFrom = [] |
+            .spec.template.spec.containers[0].env = [
+              {name: "PGHOST", value: $infra[0].rds.address}, {name: "PGPORT", value: "5432"},
+              {name: "PGDATABASE", value: $infra[0].rds.application_databases.auth.database},
+              {name: "PGSSLMODE", value: "verify-full"}, {name: "PGSSLROOTCERT", value: "/rds-ca/ca.pem"},
+              {name: "PGUSER", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "username"}}},
+              {name: "PGPASSWORD", valueFrom: {secretKeyRef: {name: "auth-postgres", key: "password"}}}] |
+            .spec.template.spec.containers[0].volumeMounts = [
+              {name: "rds-ca", mountPath: "/rds-ca", readOnly: true},
+              {name: "demo-sql", mountPath: "/demo", readOnly: true}] |
+            .spec.template.spec.volumes = [
+              {name: "rds-ca", configMap: {name: "rds-ca"}},
+              {name: "demo-sql", secret: {secretName: "demo-users-sql"}}]
+          ' /tmp/job-base.json > /tmp/seed-job.json
+          printf '%s\n' "$job_name" > /tmp/seed-job-name
+          kubectl delete job "$job_name" -n "$namespace" --ignore-not-found --wait=true --timeout=60s
+          kubectl apply -f /tmp/seed-job.json
+          kubectl wait --for=condition=complete "job/${job_name}" -n "$namespace" --timeout=300s
+          kubectl get job "$job_name" -n "$namespace" -o json --request-timeout=30s | \
+            jq -e '.status.succeeded == 1' > /dev/null
+          {
+            echo '### Usuarios de demonstracao'
+            echo
+            echo 'Senha: a mesma do segredo de smoke.'
+            echo
+            echo '| Papel | Email |'
+            echo '|---|---|'
+            echo '| MECANICO | demo.mecanico@example.invalid |'
+            echo '| GERENTE | demo.gerente@example.invalid |'
+            if [ -n "$CLIENTE_ID" ]; then
+              echo "| CLIENTE (cliente ${CLIENTE_ID}) | demo.cliente@example.invalid |"
+            else
+              echo '| CLIENTE (sem vinculo a cliente) | demo.cliente@example.invalid |'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Limpar Job e Secret temporarios
+        if: always()
+        run: |
+          namespace=$(jq -er '.name_prefix' /tmp/infra_contract.json 2>/dev/null) || exit 0
+          job_name=$(cat /tmp/seed-job-name 2>/dev/null || true)
+          if [ -n "$job_name" ]; then
+            kubectl delete job "$job_name" -n "$namespace" --ignore-not-found --wait=false || true
+          fi
+          kubectl delete secret demo-users-sql -n "$namespace" --ignore-not-found || true
