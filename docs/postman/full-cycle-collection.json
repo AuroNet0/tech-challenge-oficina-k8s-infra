@@ -205,26 +205,17 @@
           "response": []
         },
         {
-          "name": "2.1 Gerente cria Filial",
+          "name": "2.1 Gerente consulta Filial",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
                   "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"filialId\", pm.response.json().id);"
-                ]
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.variables.set(\"filialCodigo\",\"F\"+(100000+Math.floor(Math.random()*900000)));"
                 ]
               }
             }
@@ -240,62 +231,38 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"nome\":\"Filial Centro\",\"codigo\":\"{{filialCodigo}}\",\"cidade\":\"São Paulo\",\"uf\":\"SP\"}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/filiais",
+              "raw": "{{baseUrl}}/api/v1/filiais/b1be6625-34a0-5b89-910b-0958a8430597",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "filiais"
+                "filiais",
+                "b1be6625-34a0-5b89-910b-0958a8430597"
               ]
             },
-            "description": "Passo 2: Gerente cria a filial para o fluxo."
+            "description": "Passo 2: Gerente consulta a filial demo, pre-cadastrada pelo seed com as permissoes necessarias."
           },
           "response": []
         },
         {
-          "name": "2.2 Atendente cria Cliente",
+          "name": "2.2 Atendente consulta Cliente",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
                   "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"clienteId\", pm.response.json().id);"
                 ]
               }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var d=function(n){return Math.floor(Math.random()*n)};var n=[];for(var i=0;i<9;i++){n.push(d(10));}",
-                  "var dv=function(a){var s=0;for(var i=0;i<a.length;i++){s+=a[i]*(a.length+1-i);}var r=(s*10)%11;return r===10?0:r;};",
-                  "n.push(dv(n));n.push(dv(n));pm.variables.set(\"cpfTeste\",n.join(\"\"));"
-                ]
-              }
             }
           ],
           "request": {
@@ -309,65 +276,36 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"nome\":\"Cliente Teste\",\"cpfCnpj\":\"{{cpfTeste}}\",\"email\":\"cliente@example.invalid\",\"telefone\":\"11999990000\"}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/clientes?filialId={{filialId}}",
+              "raw": "{{baseUrl}}/api/v1/clientes/96e4046e-4fa5-5083-ba02-b52da62cd8e7",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "clientes"
-              ],
-              "query": [
-                {
-                  "key": "filialId",
-                  "value": "{{filialId}}"
-                }
+                "clientes",
+                "96e4046e-4fa5-5083-ba02-b52da62cd8e7"
               ]
             },
-            "description": "Passo 2: Atendente cadastra o cliente."
+            "description": "Passo 2: Atendente consulta o cliente demo, pre-cadastrado e vinculado ao usuario Cliente."
           },
           "response": []
         },
         {
-          "name": "2.3 Atendente cria Veículo",
+          "name": "2.3 Atendente consulta Veículo",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
                   "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"veiculoId\", pm.response.json().id);"
-                ]
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var L=\"ABCDEFGHJKLMNPRSTUVWXYZ\";var r=function(s){return s.charAt(Math.floor(Math.random()*s.length));};",
-                  "pm.variables.set(\"placaTeste\",r(L)+r(L)+r(L)+r(\"0123456789\")+r(L)+r(\"0123456789\")+r(\"0123456789\"));"
                 ]
               }
             }
@@ -383,40 +321,21 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"clienteId\":\"{{clienteId}}\",\"placa\":\"{{placaTeste}}\",\"marca\":\"Fiat\",\"modelo\":\"Uno\",\"ano\":2018}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/veiculos?filialId={{filialId}}",
+              "raw": "{{baseUrl}}/api/v1/veiculos/1d91f717-a078-5979-bfa9-9ce6c071c489",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "veiculos"
-              ],
-              "query": [
-                {
-                  "key": "filialId",
-                  "value": "{{filialId}}"
-                }
+                "veiculos",
+                "1d91f717-a078-5979-bfa9-9ce6c071c489"
               ]
             },
-            "description": "Passo 2: Atendente cadastra o veículo do cliente."
+            "description": "Passo 2: Atendente consulta o veiculo demo, pre-cadastrado para o cliente demo."
           },
           "response": []
         },
@@ -1217,25 +1136,17 @@
       "name": "Compensação (orçamento rejeitado)",
       "item": [
         {
-          "name": "C.1 Gerente cria Filial (compensação)",
+          "name": "C.1 Gerente consulta Filial (compensação)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"filialId\", pm.response.json().id);"
-                ]
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.variables.set(\"filialCodigo\",\"F\"+(100000+Math.floor(Math.random()*900000)));"
                 ]
               }
             }
@@ -1251,61 +1162,38 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"nome\":\"Filial Centro\",\"codigo\":\"{{filialCodigo}}\",\"cidade\":\"São Paulo\",\"uf\":\"SP\"}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/filiais",
+              "raw": "{{baseUrl}}/api/v1/filiais/b1be6625-34a0-5b89-910b-0958a8430597",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "filiais"
+                "filiais",
+                "b1be6625-34a0-5b89-910b-0958a8430597"
               ]
             },
-            "description": "Compensação Passo 2: Gerente cria filial para o fluxo de compensação."
+            "description": "Compensacao: reutiliza a filial demo."
           },
           "response": []
         },
         {
-          "name": "C.2 Atendente cria Cliente (compensação)",
+          "name": "C.2 Atendente consulta Cliente (compensação)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"clienteId\", pm.response.json().id);"
                 ]
               }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var d=function(n){return Math.floor(Math.random()*n)};var n=[];for(var i=0;i<9;i++){n.push(d(10));}",
-                  "var dv=function(a){var s=0;for(var i=0;i<a.length;i++){s+=a[i]*(a.length+1-i);}var r=(s*10)%11;return r===10?0:r;};",
-                  "n.push(dv(n));n.push(dv(n));pm.variables.set(\"cpfTeste\",n.join(\"\"));"
-                ]
-              }
             }
           ],
           "request": {
@@ -1319,64 +1207,36 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"nome\":\"Cliente Teste\",\"cpfCnpj\":\"{{cpfTeste}}\",\"email\":\"cliente@example.invalid\",\"telefone\":\"11999990000\"}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/clientes?filialId={{filialId}}",
+              "raw": "{{baseUrl}}/api/v1/clientes/96e4046e-4fa5-5083-ba02-b52da62cd8e7",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "clientes"
-              ],
-              "query": [
-                {
-                  "key": "filialId",
-                  "value": "{{filialId}}"
-                }
+                "clientes",
+                "96e4046e-4fa5-5083-ba02-b52da62cd8e7"
               ]
             },
-            "description": "Compensação Passo 2: Atendente cadastra cliente."
+            "description": "Compensacao: reutiliza o cliente demo."
           },
           "response": []
         },
         {
-          "name": "C.3 Atendente cria Veículo (compensação)",
+          "name": "C.3 Atendente consulta Veículo (compensação)",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status 201\", function () { pm.response.to.have.status(201); });",
+                  "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
                   "pm.test(\"Tempo de resposta < 5000ms\", function () { pm.expect(pm.response.responseTime).to.be.below(5000); });",
+                  "pm.test(\"Tem id\", function () { pm.expect(pm.response.json().id).to.exist; });",
                   "pm.environment.set(\"veiculoId\", pm.response.json().id);"
-                ]
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "var L=\"ABCDEFGHJKLMNPRSTUVWXYZ\";var r=function(s){return s.charAt(Math.floor(Math.random()*s.length));};",
-                  "pm.variables.set(\"placaTeste\",r(L)+r(L)+r(L)+r(\"0123456789\")+r(L)+r(\"0123456789\")+r(\"0123456789\"));"
                 ]
               }
             }
@@ -1392,40 +1252,21 @@
                 }
               ]
             },
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\"clienteId\":\"{{clienteId}}\",\"placa\":\"{{placaTeste}}\",\"marca\":\"Volkswagen\",\"modelo\":\"Gol\",\"ano\":2020}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/veiculos?filialId={{filialId}}",
+              "raw": "{{baseUrl}}/api/v1/veiculos/1d91f717-a078-5979-bfa9-9ce6c071c489",
               "host": [
                 "{{baseUrl}}"
               ],
               "path": [
                 "api",
                 "v1",
-                "veiculos"
-              ],
-              "query": [
-                {
-                  "key": "filialId",
-                  "value": "{{filialId}}"
-                }
+                "veiculos",
+                "1d91f717-a078-5979-bfa9-9ce6c071c489"
               ]
             },
-            "description": "Compensação Passo 2: Atendente cadastra veículo."
+            "description": "Compensacao: reutiliza o veiculo demo."
           },
           "response": []
         },
