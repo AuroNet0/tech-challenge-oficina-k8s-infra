@@ -1,0 +1,70 @@
+name: Mercado Pago diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      mercado_pago_secret_arn:
+        description: ARN do segredo Mercado Pago (o mesmo usado no Deploy)
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      AWS_REGION: us-east-1
+      AWS_PAGER: ''
+      MERCADO_PAGO_SECRET_ARN: ${{ inputs.mercado_pago_secret_arn }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Consultar pagamentos recentes no Mercado Pago
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::Falha ao consultar o Mercado Pago; nenhum segredo foi impresso."' ERR
+          umask 077
+          aws secretsmanager get-secret-value --secret-id "$MERCADO_PAGO_SECRET_ARN" \
+            --query SecretString --output text > /tmp/mp.json
+          token=$(jq -er '."access-token"' /tmp/mp.json)
+          printf '::add-mask::%s\n' "$token"
+          webhook=$(jq -r '."webhook-secret" // empty' /tmp/mp.json)
+          if [ -n "$webhook" ]; then printf '::add-mask::%s\n' "$webhook"; fi
+          rm -f /tmp/mp.json
+
+          mp() { curl -sS --fail-with-body --max-time 20 -H "Authorization: Bearer ${token}" "https://api.mercadopago.com$1"; }
+
+          mp /users/me > /tmp/me.json
+          mp '/v1/payments/search?sort=date_created&criteria=desc&limit=5' > /tmp/payments.json
+
+          {
+            echo '### Conta vendedora'
+            echo '```json'
+            jq '{id, site_id, tags}' /tmp/me.json
+            echo '```'
+            echo '### Pagamentos recentes (campos nao sensiveis)'
+            echo '```json'
+            jq '[.results[] | {id, status, status_detail, live_mode, transaction_amount, currency_id,
+              external_reference, collector_id, order_id: (.order.id // null), order_type: (.order.type // null),
+              metadata, date_created, date_last_updated, payment_type_id}]' /tmp/payments.json
+            echo '```'
+            echo '### Merchant orders'
+            echo '```json'
+          } > /tmp/summary.md
+
+          for order in $(jq -r '.results[] | .order.id // empty' /tmp/payments.json | sort -u); do
+            mp "/merchant_orders/${order}" | jq '{id, preference_id, external_reference, status, order_status}' >> /tmp/summary.md || true
+          done
+          echo '```' >> /tmp/summary.md
+          cat /tmp/summary.md | tee -a "$GITHUB_STEP_SUMMARY"
